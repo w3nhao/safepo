@@ -256,6 +256,7 @@ def multi_agent_args(algo):
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     cfg_train['log_dir']="../runs/"+args.experiment+'/'+args.task+'/'+algo+'/'+relpath
+    
     cfg_env={}
     if args.task in isaac_gym_map.keys():
         cfg_env_path = "marl_cfg/{}.yaml".format(isaac_gym_map[args.task])
