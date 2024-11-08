@@ -36,6 +36,12 @@ from safepo.utils.config import multi_agent_args, parse_sim_params, set_np_forma
 
 import json
 
+from distutils.util import strtobool
+
+import yaml
+import argparse
+
+
 def save_json(data, file_path):
     """Helper function to write JSON data to a file with specified formatting."""
     with open(file_path, 'w') as f:
@@ -850,9 +856,114 @@ def train(args, cfg_env, cfg_train):
     else:
         runner.run()
 
+
+def multi_agent_args(algo):
+    # Create argument parser
+    parser = argparse.ArgumentParser(description="RL Policy")
+
+    # Add arguments for all the parameters
+    parser.add_argument('--env_name', type=str, default='macpo', help='Environment name')
+    parser.add_argument('--algorithm_name', type=str, default=algo, help='Algorithm name')
+    parser.add_argument('--experiment_name', type=str, default='check', help='Experiment name')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed')
+    parser.add_argument('--run_dir', type=str, default='./runs', help='Run directory')
+    parser.add_argument('--num_env_steps', type=int, default=100000000, help='Number of environment steps')
+    parser.add_argument('--episode_length', type=int, default=8, help='Episode length')
+    parser.add_argument('--n_rollout_threads', type=int, default=1, help='Number of rollout threads')
+    parser.add_argument('--n_eval_rollout_threads', type=int, default=1, help='Number of evaluation rollout threads')
+    parser.add_argument('--hidden_size', type=int, default=512, help='Size of hidden layers')
+    parser.add_argument('--use_render', type=lambda x: bool(strtobool(x)), default=False, help='Use rendering')
+    parser.add_argument('--recurrent_N', type=int, default=1, help='Number of recurrent layers')
+    parser.add_argument('--save_interval', type=int, default=1, help='Save interval')
+    parser.add_argument('--use_eval', type=lambda x: bool(strtobool(x)), default=False, help='Use evaluation environment for testing')
+    parser.add_argument('--eval_interval', type=int, default=25, help='Evaluation interval')
+    parser.add_argument('--log_interval', type=int, default=25, help='Log interval')
+    parser.add_argument('--eval_episodes', type=int, default=10000, help='Number of evaluation episodes')
+    parser.add_argument('--cost_limit', type=float, default=25.0, help='Cost limit')
+    parser.add_argument('--EPS', type=float, default=1.e-8, help='EPS value')
+    parser.add_argument('--safety_gamma', type=float, default=0.09, help='Safety gamma')
+    parser.add_argument('--step_fraction', type=float, default=0.5, help='Step fraction')
+    parser.add_argument('--g_step_dir_coef', type=float, default=0.1, help='G step direction coefficient')
+    parser.add_argument('--b_step_dir_coef', type=float, default=0.1, help='B step direction coefficient')
+    parser.add_argument('--fraction_coef', type=float, default=0.1, help='Fraction coefficient')
+    parser.add_argument('--gamma', type=float, default=0.96, help='Gamma discount factor')
+    parser.add_argument('--gae_lambda', type=float, default=0.95, help='GAE lambda')
+    parser.add_argument('--use_gae', type=lambda x: bool(strtobool(x)), default=True, help='Use GAE')
+    parser.add_argument('--use_popart', type=lambda x: bool(strtobool(x)), default=True, help='Use PopArt normalization')
+    parser.add_argument('--use_valuenorm', type=lambda x: bool(strtobool(x)), default=True, help='Use value normalization')
+    parser.add_argument('--use_proper_time_limits', type=lambda x: bool(strtobool(x)), default=False, help='Use proper time limits')
+    parser.add_argument('--target_kl', type=float, default=0.016, help='Target KL divergence')
+    parser.add_argument('--searching_steps', type=int, default=10, help='Number of searching steps')
+    parser.add_argument('--conjugate_gradient_iters', type=int, default=10, help='Conjugate gradient iterations')
+    parser.add_argument('--accept_ratio', type=float, default=0.5, help='Accept ratio')
+    parser.add_argument('--clip_param', type=float, default=0.2, help='Clip parameter')
+    parser.add_argument('--learning_iters', type=int, default=5, help='Number of learning iterations')
+    parser.add_argument('--num_mini_batch', type=int, default=1, help='Number of mini batches')
+    parser.add_argument('--data_chunk_length', type=int, default=8, help='Data chunk length')
+    parser.add_argument('--value_loss_coef', type=float, default=1.0, help='Value loss coefficient')
+    parser.add_argument('--entropy_coef', type=float, default=0.0, help='Entropy coefficient')
+    parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Max gradient norm')
+    parser.add_argument('--huber_delta', type=float, default=10.0, help='Huber delta')
+    parser.add_argument('--use_recurrent_policy', type=lambda x: bool(strtobool(x)), default=False, help='Use recurrent policy')
+    parser.add_argument('--use_naive_recurrent_policy', type=lambda x: bool(strtobool(x)), default=False, help='Use naive recurrent policy')
+    parser.add_argument('--use_max_grad_norm', type=lambda x: bool(strtobool(x)), default=True, help='Use max gradient norm')
+    parser.add_argument('--use_clipped_value_loss', type=lambda x: bool(strtobool(x)), default=True, help='Use clipped value loss')
+    parser.add_argument('--use_huber_loss', type=lambda x: bool(strtobool(x)), default=True, help='Use Huber loss')
+    parser.add_argument('--use_value_active_masks', type=lambda x: bool(strtobool(x)), default=False, help='Use value active masks')
+    parser.add_argument('--use_policy_active_masks', type=lambda x: bool(strtobool(x)), default=False, help='Use policy active masks')
+    parser.add_argument('--actor_lr', type=float, default=9.e-5, help='Actor learning rate')
+    parser.add_argument('--critic_lr', type=float, default=5.e-3, help='Critic learning rate')
+    parser.add_argument('--opti_eps', type=float, default=1.e-5, help='Optimizer epsilon')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
+    parser.add_argument('--gain', type=float, default=0.01, help='Gain')
+    parser.add_argument('--actor_gain', type=float, default=0.01, help='Actor gain')
+    parser.add_argument('--use_orthogonal', type=lambda x: bool(strtobool(x)), default=True, help='Use orthogonal initialization')
+    parser.add_argument('--use_feature_normalization', type=lambda x: bool(strtobool(x)), default=True, help='Use feature normalization')
+    parser.add_argument('--use_ReLU', type=lambda x: bool(strtobool(x)), default=True, help='Use ReLU activation')
+    parser.add_argument('--stacked_frames', type=int, default=1, help='Number of stacked frames')
+    parser.add_argument('--layer_N', type=int, default=2, help='Number of layers')
+    parser.add_argument('--std_x_coef', type=float, default=1.0, help='Std X coefficient')
+    parser.add_argument('--std_y_coef', type=float, default=0.5, help='Std Y coefficient')
+
+    # Add any additional custom parameters here
+    parser.add_argument('--task', type=str, default='Safety2x4AntVelocity-v0', help='The task to run')
+    parser.add_argument('--agent_conf', type=str, default='2x4', help='The agent configuration')
+    parser.add_argument('--scenario', type=str, default='Ant', help='The scenario')
+    parser.add_argument('--experiment', type=str, default='Base', help='Experiment name')
+    parser.add_argument('--model_dir', type=str, default='', help='Choose a model directory')
+    parser.add_argument('--device', type=str, default='cpu', help='The device to run the model on')
+    parser.add_argument('--device_id', type=int, default=0, help='The device ID to run the model on')
+    parser.add_argument('--write_terminal', type=lambda x: bool(strtobool(x)), default=True, help='Toggles terminal logging')
+    parser.add_argument('--headless', type=lambda x: bool(strtobool(x)), default=False, help='Toggles headless mode')
+    parser.add_argument('--total_steps', type=int, default=None, help='Total timesteps of the experiments')
+    parser.add_argument('--num_envs', type=int, default=None, help='Number of parallel game environments')
+    parser.add_argument('--randomize', type=lambda x: bool(strtobool(x)), default=False, help="Whether to randomize the environments' initial states")
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Create cfg_train as a dictionary from args
+    cfg_train = vars(args).copy()
+    cfg_train['algorithm_name'] = algo  # Ensure algorithm_name is set correctly
+    cfg_train['device'] = f"{args.device}:{args.device_id}"
+
+    # Build log directory
+    relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
+    subfolder = "-".join(["seed", str(args.seed).zfill(3)])
+    relpath = "-".join([subfolder, relpath])
+    cfg_train['log_dir'] = os.path.join(args.run_dir, args.experiment_name, args.task, algo, relpath)
+
+    # Initialize cfg_env if needed
+    cfg_env = {}
+
+    # Return the arguments and configurations
+    return args, cfg_env, cfg_train
+
+
 if __name__ == '__main__':
     set_np_formatting()
     args, cfg_env, cfg_train = multi_agent_args(algo="macpo")
+    import pdb; pdb.set_trace()
     set_seed(cfg_train.get("seed", -1), cfg_train.get("torch_deterministic", False))
     
     if args.write_terminal:
