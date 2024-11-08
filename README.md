@@ -16,7 +16,7 @@ If not installed, install cuda 12.1
 ```bash
 wget https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_530.30.02_linux.run
 chmod +x cuda_12.1.0_530.30.02_linux.run
-./cuda_12.1.0_530.30.02_linux.run
+./cuda_12.1.0_530.30.02_linux.run --override
 ```
 
 ### Environment Setup
