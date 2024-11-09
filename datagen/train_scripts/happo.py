@@ -30,9 +30,19 @@ from safepo.common.env import make_ma_mujoco_env, make_ma_isaac_env, make_ma_mul
 from safepo.common.popart import PopArt
 from safepo.common.model import MultiAgentActor as Actor, MultiAgentCritic as Critic
 from safepo.common.buffer import SeparatedReplayBuffer
-from safepo.common.logger import EpochLogger
+from safepo.common.logger import EpochLogger, convert_json
 from safepo.utils.config import multi_agent_args, parse_sim_params, set_np_formatting, set_seed, multi_agent_velocity_map, isaac_gym_map, multi_agent_goal_tasks
 
+import pickle as pkl
+import json
+
+def save_json(data, file_path):
+    """Helper function to write JSON data to a file with specified formatting."""
+    with open(file_path, 'w') as f:
+        json_data = convert_json(data)
+        f.write(json.dumps(
+            json_data, separators=(",", ":\t"), indent=4, sort_keys=True
+        ))
 
 def check(input):
     output = torch.from_numpy(input) if type(input) == np.ndarray else input
@@ -553,11 +563,26 @@ def train(args, cfg_train):
         cfg_train=cfg_eval,
     )
     elif args.task in isaac_gym_map:
+        agent_index = [[[0, 1, 2, 3, 4, 5]],
+                    [[0, 1, 2, 3, 4, 5]]]
         sim_params = parse_sim_params(args, cfg_env, cfg_train)
         env = make_ma_isaac_env(args, cfg_env, cfg_train, sim_params, agent_index)
         cfg_train["n_rollout_threads"] = env.num_envs
         cfg_train["n_eval_rollout_threads"] = env.num_envs
         eval_env = env
+        
+        save_cfg_dir = str(cfg_train["log_dir"]+'/env_cfg')
+        if not os.path.exists(save_cfg_dir):
+            os.makedirs(save_cfg_dir)
+        
+        args_file = os.path.join(save_cfg_dir, 'args.pkl')
+        cfg_env_file = os.path.join(save_cfg_dir, 'cfg_env.json')
+        cfg_train_file = os.path.join(save_cfg_dir, 'cfg_train.json')
+
+        pkl.dump(args, open(args_file, 'wb'))
+        save_json(cfg_env, cfg_env_file)
+        save_json(cfg_train, cfg_train_file)
+        
     elif args.task in multi_agent_goal_tasks:
         env = make_ma_multi_goal_env(task=args.task, seed=args.seed, cfg_train=cfg_train)
         cfg_eval = copy.deepcopy(cfg_train)

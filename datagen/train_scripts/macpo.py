@@ -32,7 +32,7 @@ from safepo.common.popart import PopArt
 from safepo.common.model import MultiAgentActor as Actor, MultiAgentCritic as Critic
 from safepo.common.buffer import SeparatedReplayBuffer
 from safepo.common.logger import EpochLogger, convert_json
-from safepo.utils.config import multi_agent_args, parse_sim_params, set_np_formatting, set_seed, multi_agent_velocity_map, isaac_gym_map, multi_agent_goal_tasks
+from safepo.utils.config import warn_task_name, multi_agent_args, parse_sim_params, set_np_formatting, set_seed, multi_agent_velocity_map, isaac_gym_map, multi_agent_goal_tasks
 
 import json
 
@@ -41,6 +41,8 @@ from distutils.util import strtobool
 import yaml
 import argparse
 
+from isaacgym import gymapi
+from isaacgym.gymutil import parse_device_str
 
 def save_json(data, file_path):
     """Helper function to write JSON data to a file with specified formatting."""
@@ -821,6 +823,7 @@ def train(args, cfg_env, cfg_train):
         agent_index = [[[0, 1, 2, 3, 4, 5]],
                     [[0, 1, 2, 3, 4, 5]]]
         sim_params = parse_sim_params(args, cfg_env, cfg_train)
+
         env = make_ma_isaac_env(args, cfg_env, cfg_train, sim_params, agent_index)
         cfg_train["n_rollout_threads"] = env.num_envs
         cfg_train["n_eval_rollout_threads"] = env.num_envs
@@ -856,114 +859,244 @@ def train(args, cfg_env, cfg_train):
     else:
         runner.run()
 
+def parse_isaac_arguments(description="Isaac Gym Example", headless=False, no_graphics=False, custom_parameters=[]):
+    parser = argparse.ArgumentParser(description=description)
+    if headless:
+        parser.add_argument('--headless', action='store_true', help='Run headless without creating a viewer window')
+    if no_graphics:
+        parser.add_argument('--nographics', action='store_true',
+                            help='Disable graphics context creation, no viewer window is created, and no headless rendering is available')
+    parser.add_argument('--sim_device', type=str, default="cuda:0", help='Physics Device in PyTorch-like syntax')
+    parser.add_argument('--pipeline', type=str, default="gpu", help='Tensor API pipeline (cpu/gpu)')
+    parser.add_argument('--graphics_device_id', type=int, default=0, help='Graphics Device ID')
+
+    physics_group = parser.add_mutually_exclusive_group()
+    physics_group.add_argument('--flex', action='store_true', help='Use FleX for physics')
+    physics_group.add_argument('--physx', action='store_true', help='Use PhysX for physics')
+
+    parser.add_argument('--num_threads', type=int, default=0, help='Number of cores used by PhysX')
+    parser.add_argument('--subscenes', type=int, default=0, help='Number of PhysX subscenes to simulate in parallel')
+    parser.add_argument('--slices', type=int, help='Number of client threads that process env slices')
+
+    for argument in custom_parameters:
+        if ("name" in argument) and ("type" in argument or "action" in argument):
+            help_str = ""
+            if "help" in argument:
+                help_str = argument["help"]
+
+            if "type" in argument:
+                if "default" in argument:
+                    parser.add_argument(argument["name"], type=argument["type"], default=argument["default"], help=help_str)
+                else:
+                    parser.add_argument(argument["name"], type=argument["type"], help=help_str)
+            elif "action" in argument:
+                parser.add_argument(argument["name"], action=argument["action"], help=help_str)
+
+        else:
+            print()
+            print("ERROR: command line argument name, type/action must be defined, argument not added to parser")
+            print("supported keys: name, type, default, action, help")
+            print()
+
+    args, _ = parser.parse_known_args()
+
+    args.sim_device_type, args.compute_device_id = parse_device_str(args.sim_device)
+    pipeline = args.pipeline.lower()
+
+    assert (pipeline == 'cpu' or pipeline in ('gpu', 'cuda')), f"Invalid pipeline '{args.pipeline}'. Should be either cpu or gpu."
+    args.use_gpu_pipeline = (pipeline in ('gpu', 'cuda'))
+
+    if args.sim_device_type != 'cuda' and args.flex:
+        print("Can't use Flex with CPU. Changing sim device to 'cuda:0'")
+        args.sim_device = 'cuda:0'
+        args.sim_device_type, args.compute_device_id = parse_device_str(args.sim_device)
+
+    if (args.sim_device_type != 'cuda' and pipeline == 'gpu'):
+        print("Can't use GPU pipeline with CPU Physics. Changing pipeline to 'CPU'.")
+        args.pipeline = 'CPU'
+        args.use_gpu_pipeline = False
+
+    # Default to PhysX
+    args.physics_engine = gymapi.SIM_PHYSX
+    args.use_gpu = (args.sim_device_type == 'cuda')
+
+    if args.flex:
+        args.physics_engine = gymapi.SIM_FLEX
+
+    # Using --nographics implies --headless
+    if no_graphics and args.nographics:
+        args.headless = True
+
+    if args.slices is None:
+        args.slices = args.subscenes
+
+    return args
 
 def multi_agent_args(algo):
+
+    # Define custom parameters
+    custom_parameters = [
+        {"name": "--use-eval", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Use evaluation environment for testing"},
+        {"name": "--task", "type": str, "default": "Safety2x4AntVelocity-v0", "help": "The task to run"},
+        {"name": "--agent-conf", "type": str, "default": "2x4", "help": "The agent configuration"},
+        {"name": "--scenario", "type": str, "default": "Ant", "help": "The scenario"},
+        {"name": "--experiment", "type": str, "default": "Base", "help": "Experiment name"},
+        {"name": "--seed", "type": int, "default":0, "help": "Random seed"},
+        {"name": "--model-dir", "type": str, "default": "", "help": "Choose a model dir"},
+        {"name": "--cost-limit", "type": float, "default": 25.0, "help": "cost_lim"},
+        {"name": "--device", "type": str, "default": "cpu", "help": "The device to run the model on"},
+        {"name": "--device-id", "type": int, "default": 0, "help": "The device id to run the model on"},
+        {"name": "--write-terminal", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Toggles terminal logging"},
+        {"name": "--headless", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
+        {"name": "--total-steps", "type": int, "default": None, "help": "Total timesteps of the experiments"},
+        {"name": "--num-envs", "type": int, "default": None, "help": "The number of parallel game environments"},
+        {"name": "--randomize", "type": bool, "default": False, "help": "Wheather to randomize the environments' initial states"},
+    ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
-
-    # Add arguments for all the parameters
-    parser.add_argument('--env_name', type=str, default='macpo', help='Environment name')
-    parser.add_argument('--algorithm_name', type=str, default=algo, help='Algorithm name')
-    parser.add_argument('--experiment_name', type=str, default='check', help='Experiment name')
-    parser.add_argument('--seed', type=int, default=0, help='Random seed')
-    parser.add_argument('--run_dir', type=str, default='./runs', help='Run directory')
-    parser.add_argument('--num_env_steps', type=int, default=100000000, help='Number of environment steps')
-    parser.add_argument('--episode_length', type=int, default=8, help='Episode length')
-    parser.add_argument('--n_rollout_threads', type=int, default=1, help='Number of rollout threads')
-    parser.add_argument('--n_eval_rollout_threads', type=int, default=1, help='Number of evaluation rollout threads')
-    parser.add_argument('--hidden_size', type=int, default=512, help='Size of hidden layers')
-    parser.add_argument('--use_render', type=lambda x: bool(strtobool(x)), default=False, help='Use rendering')
-    parser.add_argument('--recurrent_N', type=int, default=1, help='Number of recurrent layers')
-    parser.add_argument('--save_interval', type=int, default=1, help='Save interval')
-    parser.add_argument('--use_eval', type=lambda x: bool(strtobool(x)), default=False, help='Use evaluation environment for testing')
-    parser.add_argument('--eval_interval', type=int, default=25, help='Evaluation interval')
-    parser.add_argument('--log_interval', type=int, default=25, help='Log interval')
-    parser.add_argument('--eval_episodes', type=int, default=10000, help='Number of evaluation episodes')
-    parser.add_argument('--cost_limit', type=float, default=25.0, help='Cost limit')
-    parser.add_argument('--EPS', type=float, default=1.e-8, help='EPS value')
-    parser.add_argument('--safety_gamma', type=float, default=0.09, help='Safety gamma')
-    parser.add_argument('--step_fraction', type=float, default=0.5, help='Step fraction')
-    parser.add_argument('--g_step_dir_coef', type=float, default=0.1, help='G step direction coefficient')
-    parser.add_argument('--b_step_dir_coef', type=float, default=0.1, help='B step direction coefficient')
-    parser.add_argument('--fraction_coef', type=float, default=0.1, help='Fraction coefficient')
-    parser.add_argument('--gamma', type=float, default=0.96, help='Gamma discount factor')
-    parser.add_argument('--gae_lambda', type=float, default=0.95, help='GAE lambda')
-    parser.add_argument('--use_gae', type=lambda x: bool(strtobool(x)), default=True, help='Use GAE')
-    parser.add_argument('--use_popart', type=lambda x: bool(strtobool(x)), default=True, help='Use PopArt normalization')
-    parser.add_argument('--use_valuenorm', type=lambda x: bool(strtobool(x)), default=True, help='Use value normalization')
-    parser.add_argument('--use_proper_time_limits', type=lambda x: bool(strtobool(x)), default=False, help='Use proper time limits')
-    parser.add_argument('--target_kl', type=float, default=0.016, help='Target KL divergence')
-    parser.add_argument('--searching_steps', type=int, default=10, help='Number of searching steps')
-    parser.add_argument('--conjugate_gradient_iters', type=int, default=10, help='Conjugate gradient iterations')
-    parser.add_argument('--accept_ratio', type=float, default=0.5, help='Accept ratio')
-    parser.add_argument('--clip_param', type=float, default=0.2, help='Clip parameter')
-    parser.add_argument('--learning_iters', type=int, default=5, help='Number of learning iterations')
-    parser.add_argument('--num_mini_batch', type=int, default=1, help='Number of mini batches')
-    parser.add_argument('--data_chunk_length', type=int, default=8, help='Data chunk length')
-    parser.add_argument('--value_loss_coef', type=float, default=1.0, help='Value loss coefficient')
-    parser.add_argument('--entropy_coef', type=float, default=0.0, help='Entropy coefficient')
-    parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Max gradient norm')
-    parser.add_argument('--huber_delta', type=float, default=10.0, help='Huber delta')
-    parser.add_argument('--use_recurrent_policy', type=lambda x: bool(strtobool(x)), default=False, help='Use recurrent policy')
-    parser.add_argument('--use_naive_recurrent_policy', type=lambda x: bool(strtobool(x)), default=False, help='Use naive recurrent policy')
-    parser.add_argument('--use_max_grad_norm', type=lambda x: bool(strtobool(x)), default=True, help='Use max gradient norm')
-    parser.add_argument('--use_clipped_value_loss', type=lambda x: bool(strtobool(x)), default=True, help='Use clipped value loss')
-    parser.add_argument('--use_huber_loss', type=lambda x: bool(strtobool(x)), default=True, help='Use Huber loss')
-    parser.add_argument('--use_value_active_masks', type=lambda x: bool(strtobool(x)), default=False, help='Use value active masks')
-    parser.add_argument('--use_policy_active_masks', type=lambda x: bool(strtobool(x)), default=False, help='Use policy active masks')
-    parser.add_argument('--actor_lr', type=float, default=9.e-5, help='Actor learning rate')
-    parser.add_argument('--critic_lr', type=float, default=5.e-3, help='Critic learning rate')
-    parser.add_argument('--opti_eps', type=float, default=1.e-5, help='Optimizer epsilon')
-    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
-    parser.add_argument('--gain', type=float, default=0.01, help='Gain')
-    parser.add_argument('--actor_gain', type=float, default=0.01, help='Actor gain')
-    parser.add_argument('--use_orthogonal', type=lambda x: bool(strtobool(x)), default=True, help='Use orthogonal initialization')
-    parser.add_argument('--use_feature_normalization', type=lambda x: bool(strtobool(x)), default=True, help='Use feature normalization')
-    parser.add_argument('--use_ReLU', type=lambda x: bool(strtobool(x)), default=True, help='Use ReLU activation')
-    parser.add_argument('--stacked_frames', type=int, default=1, help='Number of stacked frames')
-    parser.add_argument('--layer_N', type=int, default=2, help='Number of layers')
-    parser.add_argument('--std_x_coef', type=float, default=1.0, help='Std X coefficient')
-    parser.add_argument('--std_y_coef', type=float, default=0.5, help='Std Y coefficient')
-
-    # Add any additional custom parameters here
-    parser.add_argument('--task', type=str, default='Safety2x4AntVelocity-v0', help='The task to run')
-    parser.add_argument('--agent_conf', type=str, default='2x4', help='The agent configuration')
-    parser.add_argument('--scenario', type=str, default='Ant', help='The scenario')
-    parser.add_argument('--experiment', type=str, default='Base', help='Experiment name')
-    parser.add_argument('--model_dir', type=str, default='', help='Choose a model directory')
-    parser.add_argument('--device', type=str, default='cpu', help='The device to run the model on')
-    parser.add_argument('--device_id', type=int, default=0, help='The device ID to run the model on')
-    parser.add_argument('--write_terminal', type=lambda x: bool(strtobool(x)), default=True, help='Toggles terminal logging')
-    parser.add_argument('--headless', type=lambda x: bool(strtobool(x)), default=False, help='Toggles headless mode')
-    parser.add_argument('--total_steps', type=int, default=None, help='Total timesteps of the experiments')
-    parser.add_argument('--num_envs', type=int, default=None, help='Number of parallel game environments')
-    parser.add_argument('--randomize', type=lambda x: bool(strtobool(x)), default=False, help="Whether to randomize the environments' initial states")
+    issac_parameters = copy.deepcopy(custom_parameters)
+    for param in custom_parameters:
+        param_name = param.pop("name")
+        parser.add_argument(param_name, **param)
 
     # Parse arguments
-    args = parser.parse_args()
 
-    # Create cfg_train as a dictionary from args
-    cfg_train = vars(args).copy()
-    cfg_train['algorithm_name'] = algo  # Ensure algorithm_name is set correctly
-    cfg_train['device'] = f"{args.device}:{args.device_id}"
+    args, _ = parser.parse_known_args()
 
-    # Build log directory
+    if args.task in isaac_gym_map.keys():
+        try:
+            from isaacgym import gymutil
+        except ImportError:
+            raise Exception("Please install isaacgym to run Isaac Gym tasks!")
+        args = parse_isaac_arguments(description="RL Policy", custom_parameters=issac_parameters)
+
+        args.device = args.sim_device_type if args.use_gpu_pipeline else 'cpu'
+    cfg_train_path = "marl_cfg/{}/config.yaml".format(algo)
+    base_path = os.path.dirname(os.path.abspath(__file__)).replace("utils", "multi_agent")
+    
+    with open(os.path.join(base_path, cfg_train_path), 'r') as f:
+        cfg_train = yaml.load(f, Loader=yaml.SafeLoader)
+        if args.task in multi_agent_velocity_map.keys():
+            cfg_train.update(cfg_train.get("mamujoco"))
+            args.agent_conf = multi_agent_velocity_map[args.task]["agent_conf"]
+            args.scenario = multi_agent_velocity_map[args.task]["scenario"]
+        elif args.task in multi_agent_goal_tasks:
+            cfg_train.update(cfg_train.get("mamujoco"))
+
+    cfg_train["use_eval"] = args.use_eval
+    cfg_train["cost_limit"]=args.cost_limit
+    cfg_train["algorithm_name"]=algo
+    cfg_train["device"] = args.device + ":" + str(args.device_id)
+
+    cfg_train["env_name"] = args.task
+
+    if args.total_steps:
+        cfg_train["num_env_steps"] = args.total_steps
+    if args.num_envs:
+        cfg_train["n_rollout_threads"] = args.num_envs
+        cfg_train["n_eval_rollout_threads"] = args.num_envs
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
-    cfg_train['log_dir'] = os.path.join(args.run_dir, args.experiment_name, args.task, algo, relpath)
-
-    # Initialize cfg_env if needed
-    cfg_env = {}
-
-    # Return the arguments and configurations
+    cfg_train['log_dir']="../runs/"+args.experiment+'/'+args.task+'/'+algo+'/'+relpath
+    
+    cfg_env={}
+    if args.task in isaac_gym_map.keys():
+        cfg_env_path = "marl_cfg/{}.yaml".format(isaac_gym_map[args.task])
+        with open(os.path.join(base_path, cfg_env_path), 'r') as f:
+            cfg_env = yaml.load(f, Loader=yaml.SafeLoader)
+            cfg_env["name"] = args.task
+            if "task" in cfg_env:
+                if "randomize" not in cfg_env["task"]:
+                    cfg_env["task"]["randomize"] = args.randomize
+                else:
+                    cfg_env["task"]["randomize"] = False
+            else:
+                cfg_env["task"] = {"randomize": False}
+    elif args.task in multi_agent_velocity_map.keys() or args.task in multi_agent_goal_tasks:
+        pass
+    else:
+        warn_task_name()
     return args, cfg_env, cfg_train
 
+def update_cfg_from_args(cfg_train):
+    # Secondary ArgumentParser to update cfg_train
+    post_parser = argparse.ArgumentParser(description="Update Configuration", add_help=False)
+    # Add arguments for all the parameters
+    post_parser.add_argument('--env_name', type=str, default=None, help='Environment name')
+    post_parser.add_argument('--algorithm_name', type=str, default=None, help='Algorithm name')
+    post_parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name')
+    post_parser.add_argument('--seed', type=int, default=None, help='Random seed')
+    post_parser.add_argument('--run_dir', type=str, default=None, help='Run directory')
+    post_parser.add_argument('--num_env_steps', type=int, default=None, help='Number of environment steps')
+    post_parser.add_argument('--episode_length', type=int, default=None, help='Episode length')
+    post_parser.add_argument('--n_rollout_threads', type=int, default=None, help='Number of rollout threads')
+    post_parser.add_argument('--n_eval_rollout_threads', type=int, default=None, help='Number of evaluation rollout threads')
+    post_parser.add_argument('--hidden_size', type=int, default=None, help='Size of hidden layers')
+    post_parser.add_argument('--use_render', type=lambda x: bool(strtobool(x)), default=None, help='Use rendering')
+    post_parser.add_argument('--recurrent_N', type=int, default=None, help='Number of recurrent layers')
+    post_parser.add_argument('--save_interval', type=int, default=None, help='Save interval')
+    post_parser.add_argument('--use_eval', type=lambda x: bool(strtobool(x)), default=None, help='Use evaluation environment for testing')
+    post_parser.add_argument('--eval_interval', type=int, default=None, help='Evaluation interval')
+    post_parser.add_argument('--log_interval', type=int, default=None, help='Log interval')
+    post_parser.add_argument('--eval_episodes', type=int, default=None, help='Number of evaluation episodes')
+    post_parser.add_argument('--cost_limit', type=float, default=None, help='Cost limit')
+    post_parser.add_argument('--EPS', type=float, default=None, help='EPS value')
+    post_parser.add_argument('--safety_gamma', type=float, default=None, help='Safety gamma')
+    post_parser.add_argument('--step_fraction', type=float, default=None, help='Step fraction')
+    post_parser.add_argument('--g_step_dir_coef', type=float, default=None, help='G step direction coefficient')
+    post_parser.add_argument('--b_step_dir_coef', type=float, default=None, help='B step direction coefficient')
+    post_parser.add_argument('--fraction_coef', type=float, default=None, help='Fraction coefficient')
+    post_parser.add_argument('--gamma', type=float, default=None, help='Gamma discount factor')
+    post_parser.add_argument('--gae_lambda', type=float, default=None, help='GAE lambda')
+    post_parser.add_argument('--use_gae', type=lambda x: bool(strtobool(x)), default=None, help='Use GAE')
+    post_parser.add_argument('--use_popart', type=lambda x: bool(strtobool(x)), default=None, help='Use PopArt normalization')
+    post_parser.add_argument('--use_valuenorm', type=lambda x: bool(strtobool(x)), default=None, help='Use value normalization')
+    post_parser.add_argument('--use_proper_time_limits', type=lambda x: bool(strtobool(x)), default=None, help='Use proper time limits')
+    post_parser.add_argument('--target_kl', type=float, default=None, help='Target KL divergence')
+    post_parser.add_argument('--searching_steps', type=int, default=None, help='Number of searching steps')
+    post_parser.add_argument('--conjugate_gradient_iters', type=int, default=None, help='Conjugate gradient iterations')
+    post_parser.add_argument('--accept_ratio', type=float, default=None, help='Accept ratio')
+    post_parser.add_argument('--clip_param', type=float, default=None, help='Clip parameter')
+    post_parser.add_argument('--learning_iters', type=int, default=None, help='Number of learning iterations')
+    post_parser.add_argument('--num_mini_batch', type=int, default=None, help='Number of mini batches')
+    post_parser.add_argument('--data_chunk_length', type=int, default=None, help='Data chunk length')
+    post_parser.add_argument('--value_loss_coef', type=float, default=None, help='Value loss coefficient')
+    post_parser.add_argument('--entropy_coef', type=float, default=None, help='Entropy coefficient')
+    post_parser.add_argument('--max_grad_norm', type=float, default=None, help='Max gradient norm')
+    post_parser.add_argument('--huber_delta', type=float, default=None, help='Huber delta')
+    post_parser.add_argument('--use_recurrent_policy', type=lambda x: bool(strtobool(x)), default=None, help='Use recurrent policy')
+    post_parser.add_argument('--use_naive_recurrent_policy', type=lambda x: bool(strtobool(x)), default=None, help='Use naive recurrent policy')
+    post_parser.add_argument('--use_max_grad_norm', type=lambda x: bool(strtobool(x)), default=None, help='Use max gradient norm')
+    post_parser.add_argument('--use_clipped_value_loss', type=lambda x: bool(strtobool(x)), default=None, help='Use clipped value loss')
+    post_parser.add_argument('--use_huber_loss', type=lambda x: bool(strtobool(x)), default=None, help='Use Huber loss')
+    post_parser.add_argument('--use_value_active_masks', type=lambda x: bool(strtobool(x)), default=None, help='Use value active masks')
+    post_parser.add_argument('--use_policy_active_masks', type=lambda x: bool(strtobool(x)), default=None, help='Use policy active masks')
+    post_parser.add_argument('--actor_lr', type=float, default=None, help='Actor learning rate')
+    post_parser.add_argument('--critic_lr', type=float, default=None, help='Critic learning rate')
+    post_parser.add_argument('--opti_eps', type=float, default=None, help='Optimizer epsilon')
+    post_parser.add_argument('--weight_decay', type=float, default=None, help='Weight decay')
+    post_parser.add_argument('--gain', type=float, default=None, help='Gain')
+    post_parser.add_argument('--actor_gain', type=float, default=None, help='Actor gain')
+    post_parser.add_argument('--use_orthogonal', type=lambda x: bool(strtobool(x)), default=None, help='Use orthogonal initialization')
+    post_parser.add_argument('--use_feature_normalization', type=lambda x: bool(strtobool(x)), default=None, help='Use feature normalization')
+    post_parser.add_argument('--use_ReLU', type=lambda x: bool(strtobool(x)), default=None, help='Use ReLU activation')
+    post_parser.add_argument('--stacked_frames', type=int, default=None, help='Number of stacked frames')
+    post_parser.add_argument('--layer_N', type=int, default=None, help='Number of layers')
+    post_parser.add_argument('--std_x_coef', type=float, default=None, help='Std X coefficient')
+    post_parser.add_argument('--std_y_coef', type=float, default=None, help='Std Y coefficient')
+    
+    # Parse only known arguments and override cfg_train values if provided
+    post_args, _ = post_parser.parse_known_args()
+    for key, value in vars(post_args).items():
+        if value is not None:  # Only override if the argument is provided
+            cfg_train[key] = value
+    return cfg_train
 
 if __name__ == '__main__':
     set_np_formatting()
     args, cfg_env, cfg_train = multi_agent_args(algo="macpo")
-    import pdb; pdb.set_trace()
+    cfg_train = update_cfg_from_args(cfg_train)
     set_seed(cfg_train.get("seed", -1), cfg_train.get("torch_deterministic", False))
     
     if args.write_terminal:
