@@ -25,7 +25,6 @@ import torch.nn as nn
 import os
 import sys
 import time
-import pickle as pkl
 
 from safepo.common.env import make_ma_mujoco_env, make_ma_isaac_env, make_ma_multi_goal_env
 from safepo.common.popart import PopArt
@@ -34,6 +33,7 @@ from safepo.common.buffer import SeparatedReplayBuffer
 from safepo.common.logger import EpochLogger, convert_json
 from safepo.utils.config import warn_task_name, multi_agent_args, parse_sim_params, set_np_formatting, set_seed, multi_agent_velocity_map, isaac_gym_map, multi_agent_goal_tasks
 
+import pickle as pkl
 import json
 
 from distutils.util import strtobool
@@ -43,6 +43,7 @@ import argparse
 
 from isaacgym import gymapi
 from isaacgym.gymutil import parse_device_str
+
 
 def save_json(data, file_path):
     """Helper function to write JSON data to a file with specified formatting."""
@@ -61,7 +62,7 @@ def huber_loss(e, d):
     b = (e > d).float()
     return a*e**2/2 + b*d*(abs(e)-d/2)
 
-class MACPO_Policy():
+class MAPPO_L_Policy:
 
     def __init__(self, config, obs_space, cent_obs_space, act_space):
         self.config = config
@@ -85,11 +86,18 @@ class MACPO_Policy():
 
     def get_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None,
                     deterministic=False, rnn_states_cost=None):
-        actions, action_log_probs, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
+        actions, action_log_probs, rnn_states_actor = self.actor(obs,
+                                                                 rnn_states_actor,
+                                                                 masks,
+                                                                 available_actions,
+                                                                 deterministic)
 
         values, rnn_states_critic = self.critic(cent_obs, rnn_states_critic, masks)
-        cost_preds, rnn_states_cost = self.cost_critic(cent_obs, rnn_states_cost, masks)
-        return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic, cost_preds, rnn_states_cost
+        if rnn_states_cost is None:
+            return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
+        else:
+            cost_preds, rnn_states_cost = self.cost_critic(cent_obs, rnn_states_cost, masks)
+            return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic, cost_preds, rnn_states_cost
 
     def get_values(self, cent_obs, rnn_states_critic, masks):
         values, _ = self.critic(cent_obs, rnn_states_critic, masks)
@@ -101,25 +109,34 @@ class MACPO_Policy():
 
     def evaluate_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, action, masks,
                          available_actions=None, active_masks=None, rnn_states_cost=None):
-        action_log_probs, dist_entropy, action_mu, action_std \
-            = self.actor.evaluate_actions(obs, rnn_states_actor, action, masks, available_actions, active_masks)
+        action_log_probs, dist_entropy = self.actor.evaluate_actions(obs,
+                                                                     rnn_states_actor,
+                                                                     action,
+                                                                     masks,
+                                                                     available_actions,
+                                                                     active_masks)
+
         values, _ = self.critic(cent_obs, rnn_states_critic, masks)
-        cost_values, _ = self.cost_critic(cent_obs, rnn_states_cost, masks)
-        return values, action_log_probs, dist_entropy, cost_values, action_mu, action_std
+        if rnn_states_cost is None:
+            return values, action_log_probs, dist_entropy
+        else:
+            cost_values, _ = self.cost_critic(cent_obs, rnn_states_cost, masks)
+            return values, action_log_probs, dist_entropy, cost_values
 
     def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):
         actions, _, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
         return actions, rnn_states_actor
 
-class MACPO_Trainer():
-
+class MAPPO_L_Trainer:
+    
     def __init__(self, config, policy):
         
-        self.policy = policy
         self.config = config
+        self.tpdv = dict(dtype=torch.float32, device=self.config["device"])
+        self.policy = policy
 
         self.value_normalizer = PopArt(1, device=self.config["device"])
-        self.tpdv = dict(dtype=torch.float32, device=self.config["device"])
+        self.lamda_lagr = config["lamda_lagr"]
 
     def cal_value_loss(self, values, value_preds_batch, return_batch, active_masks_batch):
         value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.config["clip_param"],
@@ -134,89 +151,7 @@ class MACPO_Trainer():
 
         return value_loss.mean()
 
-    def flat_grad(self, grads):
-        grad_flatten = []
-        for grad in grads:
-            if grad is None:
-                continue
-            grad_flatten.append(grad.view(-1))
-        grad_flatten = torch.cat(grad_flatten)
-        return grad_flatten
-
-    def flat_hessian(self, hessians):
-        hessians_flatten = []
-        for hessian in hessians:
-            if hessian is None:
-                continue
-            hessians_flatten.append(hessian.contiguous().view(-1))
-        hessians_flatten = torch.cat(hessians_flatten).data
-        return hessians_flatten
-
-    def flat_params(self, model):
-        params = []
-        for param in model.parameters():
-            params.append(param.data.view(-1))
-        params_flatten = torch.cat(params)
-        return params_flatten
-
-    def update_model(self, model, new_params):
-        index = 0
-        for params in model.parameters():
-            params_length = len(params.view(-1))
-            new_param = new_params[index: index + params_length]
-            new_param = new_param.view(params.size())
-            params.data.copy_(new_param)
-            index += params_length
-
-    def kl_divergence(self, obs, rnn_states, action, masks, available_actions, active_masks, new_actor, old_actor):
-
-        _, _, mu, std = new_actor.evaluate_actions(obs, rnn_states, action, masks, available_actions, active_masks)
-        _, _, mu_old, std_old = old_actor.evaluate_actions(obs, rnn_states, action, masks, available_actions,
-                                                           active_masks)
-        logstd = torch.log(std)
-        mu_old = mu_old.detach()
-        std_old = std_old.detach()
-        logstd_old = torch.log(std_old)
-
-        kl = logstd_old - logstd + (std_old.pow(2) + (mu_old - mu).pow(2)) / \
-             (1e-8 + 2.0 * std.pow(2)) - 0.5
-
-        return kl.sum(1, keepdim=True)
-
-    def conjugate_gradient(self, actor, obs, rnn_states, action, masks, available_actions, active_masks, b, nsteps,
-                           residual_tol=1e-10):
-        x = torch.zeros(b.size()).to(device=self.config["device"])
-        r = b.clone()
-        p = b.clone()
-        rdotr = torch.dot(r, r)
-        for _ in range(nsteps):
-            _Avp = self.fisher_vector_product(actor, obs, rnn_states, action, masks, available_actions, active_masks, p)
-            alpha = rdotr / (torch.dot(p, _Avp)+1e-8)
-            x += alpha * p
-            r -= alpha * _Avp
-            new_rdotr = torch.dot(r, r)
-            betta = new_rdotr / rdotr
-            p = r + betta * p
-            rdotr = new_rdotr
-            if rdotr < residual_tol:
-                break
-        return x
-
-    def fisher_vector_product(self, actor, obs, rnn_states, action, masks, available_actions, active_masks, p):
-        p.detach()
-        kl = self.kl_divergence(obs, rnn_states, action, masks, available_actions, active_masks, new_actor=actor,
-                                old_actor=actor).mean()
-        kl_grad = torch.autograd.grad(kl, actor.parameters(), create_graph=True, allow_unused=True)
-        kl_grad = self.flat_grad(kl_grad)
-
-        kl_grad_p = (kl_grad * p).sum()
-        kl_hessian_p = torch.autograd.grad(kl_grad_p, actor.parameters(), allow_unused=True)
-        kl_hessian_p = self.flat_hessian(kl_hessian_p)
-
-        return kl_hessian_p + 0.1 * p
-
-    def trpo_update(self, sample):
-        
+    def ppo_update(self, sample):
         share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
         value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
         adv_targ, available_actions_batch, factor_batch, cost_preds_batch, cost_returns_barch, rnn_states_cost_batch, \
@@ -230,15 +165,47 @@ class MACPO_Trainer():
                     ]
         ]
 
-        values, action_log_probs, dist_entropy, cost_values, action_mu, action_std = self.policy.evaluate_actions(
-            share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
-            masks_batch, available_actions_batch, active_masks_batch, rnn_states_cost_batch
-            )
-            
+        values, action_log_probs, dist_entropy, cost_values = self.policy.evaluate_actions(share_obs_batch,
+                                                                                           obs_batch,
+                                                                                           rnn_states_batch,
+                                                                                           rnn_states_critic_batch,
+                                                                                           actions_batch,
+                                                                                           masks_batch,
+                                                                                           available_actions_batch,
+                                                                                           active_masks_batch,
+                                                                                           rnn_states_cost_batch)
+
+        adv_targ_hybrid =  adv_targ - self.lamda_lagr*cost_adv_targ
+
+        imp_weights = torch.exp(action_log_probs - old_action_log_probs_batch)
+        imp_weights = torch.prod(imp_weights, dim=-1, keepdim=True)
+
+        surr1 = imp_weights * adv_targ_hybrid
+        surr2 = torch.clamp(imp_weights, 1.0 - self.config["clip_param"], 1.0 + self.config["clip_param"]) * adv_targ_hybrid
+
+        if self.config["use_policy_active_masks"]:
+            policy_action_loss = (-torch.sum(factor_batch * torch.min(surr1, surr2),
+                                             dim=-1,
+                                             keepdim=True) * active_masks_batch).sum() / active_masks_batch.sum()
+        else:
+            policy_action_loss = -torch.sum(factor_batch * torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
+
+        policy_loss = policy_action_loss
+        self.policy.actor_optimizer.zero_grad()
+        (policy_loss - dist_entropy * self.config["entropy_coef"]).backward()
+        actor_grad_norm = nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.config["max_grad_norm"])
+        self.policy.actor_optimizer.step()
+
+        delta_lamda_lagr = -((aver_episode_costs.mean() - self.config["cost_limit"]) * (1 - self.config["gamma"]) + (imp_weights * cost_adv_targ)).mean().detach()
+
+        R_Relu = torch.nn.ReLU()
+        new_lamda_lagr = R_Relu(self.lamda_lagr - (delta_lamda_lagr * self.config["lagrangian_coef_rate"]))
+        self.lamda_lagr = new_lamda_lagr
         value_loss = self.cal_value_loss(values, value_preds_batch, return_batch, active_masks_batch)
         self.policy.critic_optimizer.zero_grad()
         (value_loss * self.config["value_loss_coef"]).backward()
         critic_grad_norm = nn.utils.clip_grad_norm_(self.policy.critic.parameters(), self.config["max_grad_norm"])
+
         self.policy.critic_optimizer.step()
 
         cost_loss = self.cal_value_loss(cost_values, cost_preds_batch, cost_returns_barch, active_masks_batch)
@@ -248,186 +215,40 @@ class MACPO_Trainer():
 
         self.policy.cost_optimizer.step()
 
-
-        rescale_constraint_val = (aver_episode_costs.mean() - self.config["cost_limit"]) * (1 - self.config["gamma"])
-
-        if rescale_constraint_val == 0:
-            rescale_constraint_val = 1e-8
-
-        ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
-        ratio = torch.prod(ratio, dim=-1, keepdim=True)
-
-        reward_loss = torch.sum(ratio * factor_batch * adv_targ, dim=-1, keepdim=True).mean()
-        reward_loss = - reward_loss
-        reward_loss_grad = torch.autograd.grad(reward_loss, self.policy.actor.parameters(), retain_graph=True,
-                                               allow_unused=True)
-        reward_loss_grad = self.flat_grad(reward_loss_grad)
-
-        cost_loss = torch.sum(ratio * factor_batch * (cost_adv_targ), dim=-1, keepdim=True).mean()
-        cost_loss_grad = torch.autograd.grad(cost_loss, self.policy.actor.parameters(), retain_graph=True,
-                                             allow_unused=True)
-        cost_loss_grad = self.flat_grad(cost_loss_grad)
-        B_cost_loss_grad = cost_loss_grad.unsqueeze(0)
-        B_cost_loss_grad = self.flat_grad(B_cost_loss_grad)
-
-        g_step_dir = self.conjugate_gradient(
-            self.policy.actor, obs_batch, rnn_states_batch, actions_batch, masks_batch,\
-            available_actions_batch, active_masks_batch, reward_loss_grad.data, nsteps=self.config["conjugate_gradient_iters"]
-        )  
-        b_step_dir = self.conjugate_gradient(
-            self.policy.actor, obs_batch, rnn_states_batch, actions_batch, masks_batch,\
-            available_actions_batch, active_masks_batch, B_cost_loss_grad.data, nsteps=self.config["conjugate_gradient_iters"]
-        )  
-
-        q_coef = (reward_loss_grad * g_step_dir).sum(0, keepdim=True)  
-        r_coef = (reward_loss_grad * b_step_dir).sum(0, keepdim=True)  
-        s_coef = (cost_loss_grad * b_step_dir).sum(0, keepdim=True)  
-
-        fraction = self.config["step_fraction"] 
-        loss_improve = 0
-
-        B_cost_loss_grad_dot = torch.dot(B_cost_loss_grad, B_cost_loss_grad)
-        if (torch.dot(B_cost_loss_grad, B_cost_loss_grad)) <= 1e-8 and rescale_constraint_val < 0:
-            b_step_dir = torch.tensor(0)
-            r_coef = torch.tensor(0)
-            s_coef = torch.tensor(0)
-            positive_Cauchy_value = torch.tensor(0)
-            whether_recover_policy_value = torch.tensor(0)
-            optim_case = 4
-        else:
-            r_coef = (reward_loss_grad * b_step_dir).sum(0, keepdim=True)  
-            s_coef = (cost_loss_grad * b_step_dir).sum(0, keepdim=True)  
-            if r_coef == 0:
-                r_coef = 1e-8
-            if s_coef == 0:
-                s_coef = 1e-8
-            positive_Cauchy_value = (
-                        q_coef - (r_coef ** 2) / (1e-8 + s_coef))  
-            whether_recover_policy_value = 2 * self.config["target_kl"] - (
-                    rescale_constraint_val ** 2) / (
-                                                       1e-8 + s_coef)
-            if rescale_constraint_val < 0 and whether_recover_policy_value < 0:
-                optim_case = 3
-            elif rescale_constraint_val < 0 and whether_recover_policy_value >= 0:
-                optim_case = 2
-            elif rescale_constraint_val >= 0 and whether_recover_policy_value >= 0:
-                optim_case = 1
-            else:
-                optim_case = 0
-        if whether_recover_policy_value == 0:
-            whether_recover_policy_value = 1e-8
-
-        if optim_case in [3, 4]:
-            lam = torch.sqrt(
-                (q_coef / (2 * self.config["target_kl"])))
-            nu = torch.tensor(0)  # v_coef = 0
-        elif optim_case in [1, 2]:
-            LA, LB = [0, r_coef / rescale_constraint_val], [r_coef / rescale_constraint_val, np.inf]
-            LA, LB = (LA, LB) if rescale_constraint_val < 0 else (LB, LA)
-            proj = lambda x, L: max(L[0], min(L[1], x))
-            lam_a = proj(torch.sqrt(positive_Cauchy_value / whether_recover_policy_value), LA)
-            lam_b = proj(torch.sqrt(q_coef / (torch.tensor(2 * self.config["target_kl"]))), LB)
-
-            f_a = lambda lam: -0.5 * (positive_Cauchy_value / (
-                        1e-8 + lam) + whether_recover_policy_value * lam) - r_coef * rescale_constraint_val / (
-                                          1e-8 + s_coef)
-            f_b = lambda lam: -0.5 * (q_coef / (1e-8 + lam) + 2 * self.config["target_kl"] * lam)
-            lam = lam_a if f_a(lam_a) >= f_b(lam_b) else lam_b
-            nu = max(0, lam * rescale_constraint_val - r_coef) / (1e-8 + s_coef)
-        else:
-            lam = torch.tensor(0)
-            nu = torch.sqrt(torch.tensor(2 * self.config["target_kl"]) / (1e-8 + s_coef))
-
-        x_a = (1. / (lam + 1e-8)) * (g_step_dir + nu * b_step_dir)
-        x_b = (nu * b_step_dir)
-        x = x_a if optim_case > 0 else x_b
-
-        reward_loss = reward_loss.detach()
-        cost_loss = cost_loss.detach()
-        params = self.flat_params(self.policy.actor)
-
-        old_actor = Actor(self.policy.config,
-                            self.policy.obs_space,
-                            self.policy.act_space,
-                            self.config["device"])
-        self.update_model(old_actor, params)
-
-        expected_improve = -torch.dot(x, reward_loss_grad).sum(0, keepdim=True)
-        expected_improve = expected_improve.detach()
-
-        flag = False
-        fraction_coef = self.config["fraction_coef"]
-        for i in range(self.config["searching_steps"]):
-            x_norm = torch.norm(x)
-            if x_norm > 0.5:
-                x = x * 0.5 / x_norm
-
-            new_params = params - fraction_coef * (fraction**i) * x
-            self.update_model(self.policy.actor, new_params)
-            values, action_log_probs, dist_entropy, new_cost_values, action_mu, action_std = self.policy.evaluate_actions(
-                share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch,\
-                actions_batch, masks_batch, available_actions_batch, active_masks_batch, rnn_states_cost_batch
-            )
-
-            ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
-            ratio = torch.prod(ratio, dim=-1, keepdim=True)
-
-            new_reward_loss = torch.sum(ratio * factor_batch * adv_targ, dim=-1, keepdim=True).mean()
-            new_cost_loss = torch.sum(ratio * factor_batch * cost_adv_targ, dim=-1, keepdim=True).mean()
-
-            new_reward_loss = new_reward_loss.detach()
-            new_reward_loss = -new_reward_loss
-            new_cost_loss = new_cost_loss.detach()
-            loss_improve = new_reward_loss - reward_loss
-
-            kl = self.kl_divergence(
-                obs_batch, rnn_states_batch, actions_batch, masks_batch,\
-                available_actions_batch, active_masks_batch, new_actor=self.policy.actor, old_actor=old_actor
-            ).mean()
-
-            if ((kl < self.config["target_kl"]) and (loss_improve < 0 if optim_case > 1 else True)
-                    and (new_cost_loss.mean() - cost_loss.mean() <= max(-rescale_constraint_val, 0))):
-                flag = True
-                break
-            expected_improve *= fraction
-
-        if not flag:
-            params = self.flat_params(old_actor)
-            self.update_model(self.policy.actor, params)
-
-        return value_loss, critic_grad_norm, kl, loss_improve, expected_improve, dist_entropy, ratio, cost_loss, cost_grad_norm, whether_recover_policy_value, cost_preds_batch, cost_returns_barch, B_cost_loss_grad, lam, nu, g_step_dir, b_step_dir, x, action_mu, action_std, B_cost_loss_grad_dot
+        return value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights, cost_loss, cost_grad_norm
 
     def train(self, buffer, logger):
         advantages = buffer.returns[:-1] - self.value_normalizer.denormalize(buffer.value_preds[:-1])
-
         advantages_copy = advantages.clone()
+        advantages_copy[buffer.active_masks[:-1] == 0.0] = np.nan
         mean_advantages = torch.mean(advantages_copy)
         std_advantages = torch.std(advantages_copy)
-        advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
+        advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
 
         cost_adv = buffer.cost_returns[:-1] - self.value_normalizer.denormalize(buffer.cost_preds[:-1])
-
         cost_adv_copy = cost_adv.clone()
-        mean_cost_adv = cost_adv_copy.mean()
-        std_cost_adv = cost_adv_copy.std()
-        cost_adv = (cost_adv - mean_cost_adv) / (std_cost_adv + 1e-5)
+        cost_adv_copy[buffer.active_masks[:-1] == 0.0] = np.nan
+        mean_cost_adv = torch.mean(cost_adv_copy)
+        std_cost_adv = torch.std(cost_adv_copy)
+        cost_adv = (cost_adv - mean_cost_adv) / (std_cost_adv + 1e-8)
 
-        data_generator = buffer.feed_forward_generator(advantages, self.config["num_mini_batch"], cost_adv=cost_adv)
-        for sample in data_generator:
-            value_loss, critic_grad_norm, kl, loss_improve, expected_improve, dist_entropy, imp_weights, cost_loss, cost_grad_norm, whether_recover_policy_value, cost_preds_batch, cost_returns_barch, B_cost_loss_grad, lam, nu, g_step_dir, b_step_dir, x, action_mu, action_std, B_cost_loss_grad_dot \
-                = self.trpo_update(sample)
-                
+        for _ in range(self.config["learning_iters"]):
+            data_generator = buffer.feed_forward_generator(advantages, self.config["num_mini_batch"], cost_adv=cost_adv)
+
+            for sample in data_generator:
+
+                value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights, cost_loss, cost_grad_norm \
+                    = self.ppo_update(sample)
+
             logger.store(
                 **{
                     "Loss/Loss_reward_critic": value_loss.item(),
                     "Loss/Loss_cost_critic": cost_loss.item(),
-                    "Loss/Loss_actor_improve": loss_improve.item(),
-                    "Loss/Loss_actor_expected_improve": expected_improve.item(),
+                    "Loss/Loss_actor": policy_loss.item(),
                     "Misc/Reward_critic_norm": critic_grad_norm.item(),
                     "Misc/Cost_critic_norm": cost_grad_norm.item(),
                     "Misc/Entropy": dist_entropy.item(),
                     "Misc/Ratio": imp_weights.detach().mean().item(),
-                    "Misc/KL": kl.detach().item(),
                 }
             )
 
@@ -468,14 +289,12 @@ class Runner:
         self.save_dir = str(config["log_dir"]+'/models_seed{}'.format(self.config["seed"]))
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
-        
-        print("\nsave_dir: ", self.save_dir)
 
         self.logger.save_config(config)
         self.policy = []
         for agent_id in range(self.num_agents):
             share_observation_space = self.envs.share_observation_space[agent_id]
-            po = MACPO_Policy(config,
+            po = MAPPO_L_Policy(config,
                         self.envs.observation_space[agent_id],
                         share_observation_space,
                         self.envs.action_space[agent_id]
@@ -488,7 +307,7 @@ class Runner:
         self.trainer = []
         self.buffer = []
         for agent_id in range(self.num_agents):
-            tr = MACPO_Trainer(config, self.policy[agent_id])
+            tr = MAPPO_L_Trainer(config, self.policy[agent_id])
             share_observation_space = self.envs.share_observation_space[agent_id]
 
             bu = SeparatedReplayBuffer(config,
@@ -500,6 +319,7 @@ class Runner:
 
     def run(self):
         self.warmup()
+
         start = time.time()
         episodes = int(self.config["num_env_steps"]) // self.config["episode_length"] // self.config["n_rollout_threads"]
 
@@ -525,7 +345,7 @@ class Runner:
 
                 train_episode_rewards += reward_env
                 train_episode_costs += cost_env
-                
+
                 for t in range(self.config["n_rollout_threads"]):
                     if dones_env[t]:
                         done_episodes_rewards.append(train_episode_rewards[:, t].clone())
@@ -573,13 +393,11 @@ class Runner:
                 self.logger.log_tabular("Train/TotalSteps", total_num_steps)
                 self.logger.log_tabular("Loss/Loss_reward_critic")
                 self.logger.log_tabular("Loss/Loss_cost_critic")
-                self.logger.log_tabular("Loss/Loss_actor_improve")
-                self.logger.log_tabular("Loss/Loss_actor_expected_improve")
+                self.logger.log_tabular("Loss/Loss_actor")
                 self.logger.log_tabular("Misc/Reward_critic_norm")
                 self.logger.log_tabular("Misc/Cost_critic_norm")
                 self.logger.log_tabular("Misc/Entropy")
                 self.logger.log_tabular("Misc/Ratio")
-                self.logger.log_tabular("Misc/KL")
                 self.logger.log_tabular("Time/Total", end - start)
                 self.logger.log_tabular("Time/FPS", int(total_num_steps / (end - start)))
                 self.logger.dump_tabular()
@@ -588,7 +406,6 @@ class Runner:
     def return_aver_cost(self, aver_episode_costs):
         for agent_id in range(self.num_agents):
             self.buffer[agent_id].return_aver_insert(aver_episode_costs)
-
 
     def warmup(self):
         # reset env
@@ -686,22 +503,20 @@ class Runner:
             available_actions = None if self.buffer[agent_id].available_actions is None \
                 else self.buffer[agent_id].available_actions[:-1].reshape(-1, *self.buffer[agent_id].available_actions.shape[2:])
 
-            old_actions_logprob, _, _, _ = self.trainer[agent_id].policy.actor.evaluate_actions(
-                self.buffer[agent_id].obs[:-1].reshape(-1, *self.buffer[agent_id].obs.shape[2:]),
-                self.buffer[agent_id].rnn_states[0:1].reshape(-1, *self.buffer[agent_id].rnn_states.shape[2:]),
-                self.buffer[agent_id].actions.reshape(-1, *self.buffer[agent_id].actions.shape[2:]),
-                self.buffer[agent_id].masks[:-1].reshape(-1, *self.buffer[agent_id].masks.shape[2:]),
-                available_actions,
-                self.buffer[agent_id].active_masks[:-1].reshape(-1, *self.buffer[agent_id].active_masks.shape[2:]))
+            old_actions_logprob, _ =self.trainer[agent_id].policy.actor.evaluate_actions(self.buffer[agent_id].obs[:-1].reshape(-1, *self.buffer[agent_id].obs.shape[2:]),
+                                                        self.buffer[agent_id].rnn_states[0:1].reshape(-1, *self.buffer[agent_id].rnn_states.shape[2:]),
+                                                        self.buffer[agent_id].actions.reshape(-1, *self.buffer[agent_id].actions.shape[2:]),
+                                                        self.buffer[agent_id].masks[:-1].reshape(-1, *self.buffer[agent_id].masks.shape[2:]),
+                                                        available_actions,
+                                                        self.buffer[agent_id].active_masks[:-1].reshape(-1, *self.buffer[agent_id].active_masks.shape[2:]))
             self.trainer[agent_id].train(self.buffer[agent_id], logger=self.logger)
 
-            new_actions_logprob, _, _, _ = self.trainer[agent_id].policy.actor.evaluate_actions(
-                self.buffer[agent_id].obs[:-1].reshape(-1, *self.buffer[agent_id].obs.shape[2:]),
-                self.buffer[agent_id].rnn_states[0:1].reshape(-1, *self.buffer[agent_id].rnn_states.shape[2:]),
-                self.buffer[agent_id].actions.reshape(-1, *self.buffer[agent_id].actions.shape[2:]),
-                self.buffer[agent_id].masks[:-1].reshape(-1, *self.buffer[agent_id].masks.shape[2:]),
-                available_actions,
-                self.buffer[agent_id].active_masks[:-1].reshape(-1, *self.buffer[agent_id].active_masks.shape[2:]))
+            new_actions_logprob, _ =self.trainer[agent_id].policy.actor.evaluate_actions(self.buffer[agent_id].obs[:-1].reshape(-1, *self.buffer[agent_id].obs.shape[2:]),
+                                                        self.buffer[agent_id].rnn_states[0:1].reshape(-1, *self.buffer[agent_id].rnn_states.shape[2:]),
+                                                        self.buffer[agent_id].actions.reshape(-1, *self.buffer[agent_id].actions.shape[2:]),
+                                                        self.buffer[agent_id].masks[:-1].reshape(-1, *self.buffer[agent_id].masks.shape[2:]),
+                                                        available_actions,
+                                                        self.buffer[agent_id].active_masks[:-1].reshape(-1, *self.buffer[agent_id].active_masks.shape[2:]))
 
             action_prod = torch.prod(torch.exp(new_actions_logprob.detach()-old_actions_logprob.detach()).reshape(self.config["episode_length"],self.config["n_rollout_threads"],action_dim), dim=-1, keepdim=True)
             factor = factor*action_prod.detach()
@@ -720,6 +535,7 @@ class Runner:
         if step is not None:
             save_dir = self.save_dir + "/model_step{}".format(step)
         else:
+            last_store_step = 0
             for file in os.listdir(self.save_dir):
                 if "model_step" in file:
                     last_store_step = max(last_store_step, int(file.split("model_step")[-1]))
@@ -730,7 +546,7 @@ class Runner:
             self.policy[agent_id].actor.load_state_dict(policy_actor_state_dict)
             policy_critic_state_dict = torch.load(str(save_dir) + '/critic_agent' + str(agent_id) + '.pt')
             self.policy[agent_id].critic.load_state_dict(policy_critic_state_dict)
-            
+
     @torch.no_grad()
     def eval(self, eval_episodes=1):
         eval_episode = 0
@@ -740,7 +556,7 @@ class Runner:
         one_episode_costs = torch.zeros(1, self.config["n_eval_rollout_threads"], device=self.config["device"])
 
         eval_obs, _, _ = self.eval_envs.reset()
-        
+
         eval_rnn_states = torch.zeros(self.config["n_eval_rollout_threads"], self.num_agents, self.config["recurrent_N"], self.config["hidden_size"],
                                    device=self.config["device"])
         eval_masks = torch.ones(self.config["n_eval_rollout_threads"], self.num_agents, 1, device=self.config["device"])
@@ -753,7 +569,6 @@ class Runner:
                     obs_to_eval = eval_obs[agent_id]
                 else:
                     obs_to_eval = eval_obs[:, agent_id]
-                    
                 eval_actions, temp_rnn_state = \
                     self.trainer[agent_id].policy.act(obs_to_eval,
                                                       eval_rnn_states[:, agent_id],
@@ -765,7 +580,6 @@ class Runner:
             if self.config["env_name"] == "Safety9|8HumanoidVelocity-v0":
                 zeros = torch.zeros(eval_actions_collector[-1].shape[0], 1)
                 eval_actions_collector[-1]=torch.cat((eval_actions_collector[-1], zeros), dim=1)
-
             eval_obs, _, eval_rewards, eval_costs, eval_dones, _, _ = self.eval_envs.step(
                 eval_actions_collector
             )
@@ -812,7 +626,9 @@ class Runner:
             next_costs = next_costs.detach()
             self.buffer[agent_id].compute_cost_returns(next_costs, self.trainer[agent_id].value_normalizer)
 
-def train(args, cfg_env, cfg_train):
+def train(args, cfg_train):
+    agent_index = [[[0, 1, 2, 3, 4, 5]],
+                   [[0, 1, 2, 3, 4, 5]]]
     if args.task in multi_agent_velocity_map:
         env = make_ma_mujoco_env(
         scenario=args.scenario,
@@ -833,7 +649,6 @@ def train(args, cfg_env, cfg_train):
         agent_index = [[[0, 1, 2, 3, 4, 5]],
                     [[0, 1, 2, 3, 4, 5]]]
         sim_params = parse_sim_params(args, cfg_env, cfg_train)
-
         env = make_ma_isaac_env(args, cfg_env, cfg_train, sim_params, agent_index)
         cfg_train["n_rollout_threads"] = env.num_envs
         cfg_train["n_eval_rollout_threads"] = env.num_envs
@@ -851,13 +666,13 @@ def train(args, cfg_env, cfg_train):
         save_json(cfg_env, cfg_env_file)
         save_json(cfg_train, cfg_train_file)
         
+        
     elif args.task in multi_agent_goal_tasks:
         env = make_ma_multi_goal_env(task=args.task, seed=args.seed, cfg_train=cfg_train)
         cfg_eval = copy.deepcopy(cfg_train)
         cfg_eval["seed"] = args.seed + 10000
         cfg_eval["n_rollout_threads"] = cfg_eval["n_eval_rollout_threads"]
         eval_env = make_ma_multi_goal_env(task=args.task, seed=args.seed + 10000, cfg_train=cfg_eval)
-    
     else: 
         raise NotImplementedError
     
@@ -868,7 +683,7 @@ def train(args, cfg_env, cfg_train):
         runner.eval(100000)
     else:
         runner.run()
-
+        
 def parse_isaac_arguments(description="Isaac Gym Example", headless=False, no_graphics=False, custom_parameters=[]):
     parser = argparse.ArgumentParser(description=description)
     if headless:
@@ -1032,7 +847,7 @@ def multi_agent_args(algo):
 def update_cfg_from_args(cfg_train):
     # Secondary ArgumentParser to update cfg_train
     post_parser = argparse.ArgumentParser(description="Update Configuration", add_help=False)
-    # Add arguments for all the parameters
+    # Adding arguments for all parameters, including those from `mamujoco`
     post_parser.add_argument('--env_name', type=str, default=None, help='Environment name')
     post_parser.add_argument('--algorithm_name', type=str, default=None, help='Algorithm name')
     post_parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name')
@@ -1045,18 +860,15 @@ def update_cfg_from_args(cfg_train):
     post_parser.add_argument('--hidden_size', type=int, default=None, help='Size of hidden layers')
     post_parser.add_argument('--use_render', type=lambda x: bool(strtobool(x)), default=None, help='Use rendering')
     post_parser.add_argument('--recurrent_N', type=int, default=None, help='Number of recurrent layers')
+    post_parser.add_argument('--use_single_network', type=lambda x: bool(strtobool(x)), default=None, help='Use single network')
     post_parser.add_argument('--save_interval', type=int, default=None, help='Save interval')
     post_parser.add_argument('--use_eval', type=lambda x: bool(strtobool(x)), default=None, help='Use evaluation environment for testing')
     post_parser.add_argument('--eval_interval', type=int, default=None, help='Evaluation interval')
     post_parser.add_argument('--log_interval', type=int, default=None, help='Log interval')
     post_parser.add_argument('--eval_episodes', type=int, default=None, help='Number of evaluation episodes')
     post_parser.add_argument('--cost_limit', type=float, default=None, help='Cost limit')
-    post_parser.add_argument('--EPS', type=float, default=None, help='EPS value')
-    post_parser.add_argument('--safety_gamma', type=float, default=None, help='Safety gamma')
-    post_parser.add_argument('--step_fraction', type=float, default=None, help='Step fraction')
-    post_parser.add_argument('--g_step_dir_coef', type=float, default=None, help='G step direction coefficient')
-    post_parser.add_argument('--b_step_dir_coef', type=float, default=None, help='B step direction coefficient')
-    post_parser.add_argument('--fraction_coef', type=float, default=None, help='Fraction coefficient')
+    post_parser.add_argument('--lagrangian_coef_rate', type=float, default=None, help='Lagrangian coefficient rate')
+    post_parser.add_argument('--lamda_lagr', type=float, default=None, help='Lambda Lagrangian')
     post_parser.add_argument('--gamma', type=float, default=None, help='Gamma discount factor')
     post_parser.add_argument('--gae_lambda', type=float, default=None, help='GAE lambda')
     post_parser.add_argument('--use_gae', type=lambda x: bool(strtobool(x)), default=None, help='Use GAE')
@@ -1065,7 +877,6 @@ def update_cfg_from_args(cfg_train):
     post_parser.add_argument('--use_proper_time_limits', type=lambda x: bool(strtobool(x)), default=None, help='Use proper time limits')
     post_parser.add_argument('--target_kl', type=float, default=None, help='Target KL divergence')
     post_parser.add_argument('--searching_steps', type=int, default=None, help='Number of searching steps')
-    post_parser.add_argument('--conjugate_gradient_iters', type=int, default=None, help='Conjugate gradient iterations')
     post_parser.add_argument('--accept_ratio', type=float, default=None, help='Accept ratio')
     post_parser.add_argument('--clip_param', type=float, default=None, help='Clip parameter')
     post_parser.add_argument('--learning_iters', type=int, default=None, help='Number of learning iterations')
@@ -1105,13 +916,11 @@ def update_cfg_from_args(cfg_train):
 
 if __name__ == '__main__':
     set_np_formatting()
-    args, cfg_env, cfg_train = multi_agent_args(algo="macpo")
+    args, cfg_env, cfg_train = multi_agent_args(algo="mappolag")
     cfg_train = update_cfg_from_args(cfg_train)
     set_seed(cfg_train.get("seed", -1), cfg_train.get("torch_deterministic", False))
-    
     if args.write_terminal:
-        train(args=args, cfg_env=cfg_env, cfg_train=cfg_train)
-        
+        train(args=args, cfg_train=cfg_train)
     else:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"
@@ -1139,4 +948,4 @@ if __name__ == '__main__':
                 encoding="utf-8",
             ) as f_error:
                 sys.stderr = f_error
-                train(args=args, cfg_env=cfg_env, cfg_train=cfg_train)
+                train(args=args, cfg_train=cfg_train)
