@@ -525,7 +525,7 @@ class Runner:
 
                 train_episode_rewards += reward_env
                 train_episode_costs += cost_env
-
+                
                 for t in range(self.config["n_rollout_threads"]):
                     if dones_env[t]:
                         done_episodes_rewards.append(train_episode_rewards[:, t].clone())
@@ -545,7 +545,7 @@ class Runner:
             total_num_steps = (episode + 1) * self.config["episode_length"] * self.config["n_rollout_threads"]
 
             if (episode % self.config["save_interval"] == 0 or episode == episodes - 1):
-                self.save()
+                self.save(total_num_steps)
                 
             end = time.time()
             
@@ -707,20 +707,30 @@ class Runner:
             factor = factor*action_prod.detach()
             self.buffer[agent_id].after_update()
 
-    def save(self):
+    def save(self, step):
+        save_dir = self.save_dir + "/model_step{}".format(step)
+        os.makedirs(save_dir, exist_ok=True)
         for agent_id in range(self.num_agents):
             policy_actor = self.trainer[agent_id].policy.actor
-            torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor_agent" + str(agent_id) + ".pt")
+            torch.save(policy_actor.state_dict(), str(save_dir) + "/actor_agent" + str(agent_id) + ".pt")
             policy_critic = self.trainer[agent_id].policy.critic
-            torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic_agent" + str(agent_id) + ".pt")
+            torch.save(policy_critic.state_dict(), str(save_dir) + "/critic_agent" + str(agent_id) + ".pt")
 
-    def restore(self):
+    def restore(self, step=None):
+        if step is not None:
+            save_dir = self.save_dir + "/model_step{}".format(step)
+        else:
+            for file in os.listdir(self.save_dir):
+                if "model_step" in file:
+                    last_store_step = max(last_store_step, int(file.split("model_step")[-1]))
+            save_dir = self.save_dir + "/model_step{}".format(last_store_step)
+        
         for agent_id in range(self.num_agents):
-            policy_actor_state_dict = torch.load(str(self.model_dir) + '/actor_agent' + str(agent_id) + '.pt')
+            policy_actor_state_dict = torch.load(str(save_dir) + '/actor_agent' + str(agent_id) + '.pt')
             self.policy[agent_id].actor.load_state_dict(policy_actor_state_dict)
-            policy_critic_state_dict = torch.load(str(self.model_dir) + '/critic_agent' + str(agent_id) + '.pt')
+            policy_critic_state_dict = torch.load(str(save_dir) + '/critic_agent' + str(agent_id) + '.pt')
             self.policy[agent_id].critic.load_state_dict(policy_critic_state_dict)
-
+            
     @torch.no_grad()
     def eval(self, eval_episodes=1):
         eval_episode = 0
