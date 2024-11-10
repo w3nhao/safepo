@@ -29,11 +29,13 @@ conda install -c conda-forge gcc
 pip install -e ./isaac-gym/python
 pip install -e ./safe-policy-optimization
 pip install -e ./safety-gymnasium
+pip install -e ./datagen
 ```
 
 ### Example Usage
 #### Parameter Tuning
 Modify the `train_scripts/marl_cfg/YOUR_ALGO/config.yaml` file to tune the hyperparameters.
+Or, add --PARAM_NAME PARAM_VALUE to the command line arguments following the `train_scripts/marl_cfg/YOUR_ALGO/config.yaml` file.
 
 #### Commands
 ```bash
