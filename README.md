@@ -38,9 +38,15 @@ Modify the `train_scripts/marl_cfg/YOUR_ALGO/config.yaml` file to tune the hyper
 Or, add --PARAM_NAME PARAM_VALUE to the command line arguments following the `train_scripts/marl_cfg/YOUR_ALGO/config.yaml` file.
 
 #### Commands
+Run the following command to train the agent using the specified algorithm.
 ```bash
 cd datagen
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib
 python train_scripts/macpo.py --task FreightFrankaCloseDrawer --experiment benchmark
+```
+
+Sync the results to the visualization server.
+```bash
+rsync -avz -e "ssh -p PORT" root@TRAINER_IP:path/to/safepo/runs path/to/safepo/runs
 ```
