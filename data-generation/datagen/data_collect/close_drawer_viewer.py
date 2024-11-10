@@ -94,11 +94,14 @@ def eval_multi_agent(eval_dir, eval_episodes):
         cfg_env = json.load(open(cfg_env_path, 'r'))
         cfg_train = json.load(open(cfg_train_path, 'r'))
         
-        # cfg_env['env']['numEnvs'] = 1
-        cfg_env['env']['headless'] = True
-        # cfg_env['env']['device_id'] = 1
-        # cfg_train['n_rollout_threads'] = 1
-        # cfg_train['n_eval_rollout_threads'] = 1
+        cfg_env['env']['numEnvs'] = 10
+        cfg_train['n_eval_rollout_threads'] = 10
+        cfg_train['n_rollout_threads'] = 10
+        cfg_train['log_dir'] = eval_dir
+        
+        config['n_eval_rollout_threads'] = 10
+        config['n_rollout_threads'] = 10
+        config['log_dir'] = eval_dir
         
         sim_params = parse_sim_params(train_args, cfg_env, cfg_train)
         env = make_ma_isaac_env(train_args, cfg_env, cfg_train, sim_params, agent_index)
@@ -177,7 +180,9 @@ def benchmark_eval():
             cost_mean = round(np.mean(costs), 2)
             cost_std = round(np.std(costs), 2)
             print(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std}, the reuslt is saved in {save_dir}/eval_result.txt")
-            output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std} \n")
+            # output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std} \n")
+
+            output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}+/-{reward_std}, cost: {cost_mean}+/-{cost_std} \n")
 
 if __name__ == '__main__':
     benchmark_eval()

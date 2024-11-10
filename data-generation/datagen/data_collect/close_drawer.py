@@ -1841,9 +1841,12 @@ def eval_multi_agent(eval_dir, eval_episodes):
         cfg_env['env']['numEnvs'] = 10
         cfg_train['n_eval_rollout_threads'] = 10
         cfg_train['n_rollout_threads'] = 10
+        cfg_train['log_dir'] = eval_dir
         
         config['n_eval_rollout_threads'] = 10
         config['n_rollout_threads'] = 10
+        config['log_dir'] = eval_dir
+        
         # cfg_env['env']['headless'] = True
         # cfg_env['env']['device_id'] = 1
         # cfg_train['n_rollout_threads'] = 1

@@ -470,12 +470,9 @@ class Runner:
         else:
             last_store_step = 0
             for file in os.listdir(self.save_dir):
-                import pdb; pdb.set_trace()
-                
                 if "model_step" in file:
                     last_store_step = max(last_store_step, int(file.split("model_step")[-1]))
             save_dir = self.save_dir + "/model_step{}".format(last_store_step)
-        import pdb; pdb.set_trace()
         
         for agent_id in range(self.num_agents):
             policy_actor_state_dict = torch.load(str(save_dir) + '/actor_agent' + str(agent_id) + '.pt')
