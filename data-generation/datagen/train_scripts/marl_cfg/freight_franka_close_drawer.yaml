@@ -39,10 +39,10 @@ env:
       resetDofPosRandomInterval: 0.0
       resetDofVelRandomInterval: 0.0
     franka:
-      resetPositionNoise: 0.1
-      resetRotationNoise: 0.1
-      resetDofPosRandomInterval: 0.1
-      resetDofVelRandomInterval: 0.1
+      resetPositionNoise: 0.0
+      resetRotationNoise: 0.0
+      resetDofPosRandomInterval: 0.0
+      resetDofVelRandomInterval: 0.0
 
   driveMode: "pos"
   clipObservations: 5.0
