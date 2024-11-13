@@ -228,7 +228,7 @@ def multi_agent_args(algo):
         except ImportError:
             raise Exception("Please install isaacgym to run Isaac Gym tasks!")
         args = gymutil.parse_arguments(description="RL Policy", custom_parameters=issac_parameters)
-        import pdb; pdb.set_trace()
+
         args.device = args.sim_device_type if args.use_gpu_pipeline else 'cpu'
     cfg_train_path = "marl_cfg/{}/config.yaml".format(algo)
     base_path = os.path.dirname(os.path.abspath(__file__)).replace("utils", "multi_agent")
@@ -276,6 +276,5 @@ def multi_agent_args(algo):
         pass
     else:
         warn_task_name()
-
     return args, cfg_env, cfg_train
 

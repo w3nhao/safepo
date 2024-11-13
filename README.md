@@ -40,10 +40,10 @@ Or, add --PARAM_NAME PARAM_VALUE to the command line arguments following the `tr
 #### Commands
 Run the following command to train the agent using the specified algorithm.
 ```bash
-cd datagen
+cd data-generation
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib
-python train_scripts/macpo.py --task FreightFrankaCloseDrawer --experiment benchmark
+python datagen/train_scripts/macpo.py --task FreightFrankaCloseDrawer --experiment benchmark
 ```
 
 Sync the results to the visualization server.
