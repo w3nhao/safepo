@@ -785,10 +785,9 @@ class FreightFrankaCloseDrawer(BaseTask):
         # Create cameras in each environment
         for env in tqdm(self.env_ptr_list, desc='Creating cameras'):
             camera_handle = self.gym.create_camera_sensor(env, camera_props)
-            # import pdb; pdb.set_trace()
-            # Set camera position and orientation
-            camera_position = gymapi.Vec3(2.0, 2.0, 2.0)  # Adjust as needed
+            camera_position = gymapi.Vec3(1.0, -1.5, 1.5)  # Adjust as needed
             camera_target = gymapi.Vec3(0.0, 0.0, 0.0)
+        
             self.gym.set_camera_location(camera_handle, env, camera_position, camera_target)
 
             self.cameras.append(camera_handle)
@@ -1426,6 +1425,8 @@ class FreightFrankaCloseDrawer(BaseTask):
             self.render()
         if self.cfg['env']['enableCameraSensors'] == True:
             self.gym.step_graphics(self.sim)
+            
+        import pdb; pdb.set_trace()
 
         self._refresh_observation()
         success = self.success.clone()
@@ -1504,8 +1505,8 @@ class FreightFrankaCloseDrawer(BaseTask):
             img = torch_image_tensor.cpu().numpy()
 
             # Convert image from RGBA to RGB and flip vertically
-            img_rgb = img[..., :3]
-            img_rgb = np.flipud(img_rgb).astype(np.uint8)
+            img_rgb = img[..., :3].astype(np.uint8)
+            # img_rgb = np.flipud(img_rgb).astype(np.uint8)
 
             # Build the output path
             env_dir = self.output_dirs[env_id]
@@ -1642,7 +1643,7 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
         actions_tensor = torch.clamp(actions, self.clip_actions_low, self.clip_actions_high)
 
         obs_buf, rew_buf, cost_buf, reset_buf, _ = self.task.step(actions_tensor)
-
+        
         sub_agent_obs = []
         # self.process_sub_agent_obs(self.agent_dof_index, self.agent_finger_index, obs_buf)
         num_freight_obs = self.num_freight_obs // 2
@@ -1821,7 +1822,7 @@ def make_ma_isaac_env(args, cfg, cfg_train, sim_params, agent_index):
 
     return env
 
-def eval_multi_agent(eval_dir, eval_episodes):
+def eval_multi_agent(eval_dir, eval_episodes, num_envs=10, load_step=None):
 
     config_path = eval_dir + '/config.json'
     config = json.load(open(config_path, 'r'))
@@ -1838,19 +1839,17 @@ def eval_multi_agent(eval_dir, eval_episodes):
         cfg_env = json.load(open(cfg_env_path, 'r'))
         cfg_train = json.load(open(cfg_train_path, 'r'))
         
-        cfg_env['env']['numEnvs'] = 10
-        cfg_train['n_eval_rollout_threads'] = 10
-        cfg_train['n_rollout_threads'] = 10
+        cfg_env['env']['numEnvs'] = num_envs
+        cfg_train['n_eval_rollout_threads'] = num_envs
+        cfg_train['n_rollout_threads'] = num_envs
         cfg_train['log_dir'] = eval_dir
         
-        config['n_eval_rollout_threads'] = 10
-        config['n_rollout_threads'] = 10
+        config['n_eval_rollout_threads'] = num_envs
+        config['n_rollout_threads'] = num_envs
         config['log_dir'] = eval_dir
         
         # cfg_env['env']['headless'] = True
         # cfg_env['env']['device_id'] = 1
-        # cfg_train['n_rollout_threads'] = 1
-        # cfg_train['n_eval_rollout_threads'] = 1
         
         sim_params = parse_sim_params(train_args, cfg_env, cfg_train)
         env = make_ma_isaac_env(train_args, cfg_env, cfg_train, sim_params, agent_index)
@@ -1862,13 +1861,13 @@ def eval_multi_agent(eval_dir, eval_episodes):
     model_dir = eval_dir + f"/models_seed{config['seed']}"
     algo = config['algorithm_name']
     if algo == 'macpo':
-        from safepo.multi_agent.macpo import Runner
+        from datagen.train_scripts.macpo import Runner
     elif algo == 'mappo':
-        from safepo.multi_agent.mappo import Runner
+        from datagen.train_scripts.mappo import Runner
     elif algo == 'mappolag':
-        from safepo.multi_agent.mappolag import Runner
+        from datagen.train_scripts.mappolag import Runner
     elif algo == 'happo':
-        from safepo.multi_agent.happo import Runner
+        from datagen.train_scripts.happo import Runner
     else:
         raise NotImplementedError
     torch.set_num_threads(4)
@@ -1888,46 +1887,33 @@ def eval_multi_agent(eval_dir, eval_episodes):
 
 def benchmark_eval():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark-dir", type=str, default='', help="the directory of the evaluation")
-    parser.add_argument("--eval-episodes", type=int, default=1, help="the number of episodes to evaluate")
+    parser.add_argument("--exp-dir", type=str, default='', help="the directory of the evaluation")
+    parser.add_argument("--eval-episodes", type=int, default=10, help="the number of episodes to evaluate")
     parser.add_argument("--save-dir", type=str, default=None, help="the directory to save the evaluation result")
 
     args = parser.parse_args()
 
-    benchmark_dir = args.benchmark_dir
+    exp_dir = args.exp_dir
     eval_episodes = args.eval_episodes
     if args.save_dir is not None:
         save_dir = args.save_dir
     else:
-        save_dir = benchmark_dir.replace('runs', 'results')
+        save_dir = exp_dir.replace('runs', 'results')
         if os.path.exists(save_dir) is False:
             os.makedirs(save_dir)
-    envs = os.listdir(benchmark_dir)
-    for env in envs:
-        env_path = os.path.join(benchmark_dir, env)
-        algos = os.listdir(env_path)
-        for algo in algos:
-            print(f"Start evaluating {algo} in {env}")
-            algo_path = os.path.join(env_path, algo)
-            seeds = os.listdir(algo_path)
-            rewards, costs = [], []
-            for seed in seeds:
-                print("so far so good")
-                seed_path = os.path.join(algo_path, seed)
-                reward, cost = eval_multi_agent(seed_path, eval_episodes)
-                rewards.append(reward)
-                costs.append(cost)
-                
-            output_file = open(f"{save_dir}/eval_result.txt", 'a')
-            
-            # two wise after point
-            reward_mean = round(np.mean(rewards), 2)
-            reward_std = round(np.std(rewards), 2)
-            cost_mean = round(np.mean(costs), 2)
-            cost_std = round(np.std(costs), 2)
-            print(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std}, the reuslt is saved in {save_dir}/eval_result.txt")
-            # output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std} \n")
-            output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}+/-{reward_std}, cost: {cost_mean}+/-{cost_std} \n")
+
+        reward, cost = eval_multi_agent(exp_dir, eval_episodes, num_envs=1)
+        
+        # output_file = open(f"{save_dir}/eval_result.txt", 'a')
+        
+        # # two wise after point
+        # reward_mean = round(np.mean(rewards), 2)
+        # reward_std = round(np.std(rewards), 2)
+        # cost_mean = round(np.mean(costs), 2)
+        # cost_std = round(np.std(costs), 2)
+        # print(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std}, the reuslt is saved in {save_dir}/eval_result.txt")
+        # # output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std} \n")
+        # output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}+/-{reward_std}, cost: {cost_mean}+/-{cost_std} \n")
 
 
 if __name__ == '__main__':

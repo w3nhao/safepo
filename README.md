@@ -50,3 +50,11 @@ Sync the results to the visualization server.
 ```bash
 rsync -avz -e "ssh -p PORT" root@TRAINER_IP:path/to/safepo/runs path/to/safepo/runs
 ```
+
+Preview the trained agent with GUI
+```bash
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib
+python3 data-generation/datagen/data_collect/close_drawer_viewer.py --benchmark-dir /data-generation/runs/benchmark
+```
+
+

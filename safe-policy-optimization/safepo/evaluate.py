@@ -130,13 +130,13 @@ def eval_multi_agent(eval_dir, eval_episodes):
     model_dir = eval_dir + f"/models_seed{config['seed']}"
     algo = config['algorithm_name']
     if algo == 'macpo':
-        from safepo.multi_agent.macpo import Runner
+        from datagen.train_scripts.macpo import Runner
     elif algo == 'mappo':
-        from safepo.multi_agent.mappo import Runner
+        from datagen.train_scripts.mappo import Runner
     elif algo == 'mappolag':
-        from safepo.multi_agent.mappolag import Runner
+        from datagen.train_scripts.mappolag import Runner
     elif algo == 'happo':
-        from safepo.multi_agent.happo import Runner
+        from datagen.train_scripts.happo import Runner
     else:
         raise NotImplementedError
     torch.set_num_threads(4)
