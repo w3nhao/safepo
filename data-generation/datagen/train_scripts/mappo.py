@@ -271,7 +271,6 @@ class Runner:
 
         start = time.time()
         episodes = int(self.config["num_env_steps"]) // self.config["episode_length"] // self.config["n_rollout_threads"]
-        print(f"Running for {episodes} episodes")
         
         train_episode_rewards = torch.zeros(1, self.config["n_rollout_threads"], device=self.config["device"])
         train_episode_costs = torch.zeros(1, self.config["n_rollout_threads"], device=self.config["device"])
@@ -281,12 +280,12 @@ class Runner:
 
             done_episodes_rewards = []
             done_episodes_costs = []
-
+            
             for step in range(self.config["episode_length"]):
                 # Sample actions
                 values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(step)
                 obs, share_obs, rewards, costs, dones, infos, _ = self.envs.step(actions)
-
+                
                 dones_env = torch.all(dones, dim=1)
 
                 reward_env = torch.mean(rewards, dim=1).flatten()
@@ -324,10 +323,16 @@ class Runner:
                 aver_episode_rewards = torch.stack(done_episodes_rewards).mean()
                 aver_episode_costs = torch.stack(done_episodes_costs).mean()
                 self.return_aver_cost(aver_episode_costs)
+                
+                for s in range(len(done_episodes_rewards)):
+                    self.logger.store(
+                        **{
+                            "Metrics/EpRet": done_episodes_rewards[s].item(),
+                            "Metrics/EpCost": done_episodes_costs[s].item(),
+                        }
+                    )
                 self.logger.store(
                     **{
-                        "Metrics/EpRet": aver_episode_rewards.item(),
-                        "Metrics/EpCost": aver_episode_costs.item(),
                         "Eval/EpRet": eval_rewards,
                         "Eval/EpCost": eval_costs,
                     }

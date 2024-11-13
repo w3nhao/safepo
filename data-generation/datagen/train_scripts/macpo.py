@@ -556,10 +556,16 @@ class Runner:
                 aver_episode_rewards = torch.stack(done_episodes_rewards).mean()
                 aver_episode_costs = torch.stack(done_episodes_costs).mean()
                 self.return_aver_cost(aver_episode_costs)
+                
+                for s in range(len(done_episodes_rewards)):
+                    self.logger.store(
+                        **{
+                            "Metrics/EpRet": done_episodes_rewards[s].item(),
+                            "Metrics/EpCost": done_episodes_costs[s].item(),
+                        }
+                    )
                 self.logger.store(
                     **{
-                        "Metrics/EpRet": aver_episode_rewards.item(),
-                        "Metrics/EpCost": aver_episode_costs.item(),
                         "Eval/EpRet": eval_rewards,
                         "Eval/EpCost": eval_costs,
                     }

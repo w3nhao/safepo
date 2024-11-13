@@ -34,15 +34,15 @@ env:
 
   reset:
     cabinet:
-      resetPositionNoise: 0.0
-      resetRotationNoise: 0.0
-      resetDofPosRandomInterval: 0.0
-      resetDofVelRandomInterval: 0.0
+      resetPositionNoise: 0
+      resetRotationNoise: 0
+      resetDofPosRandomInterval: 0
+      resetDofVelRandomInterval: 0
     franka:
-      resetPositionNoise: 0.0
-      resetRotationNoise: 0.0
-      resetDofPosRandomInterval: 0.0
-      resetDofVelRandomInterval: 0.0
+      resetPositionNoise: 0
+      resetRotationNoise: 0
+      resetDofPosRandomInterval: 0
+      resetDofVelRandomInterval: 0
 
   driveMode: "pos"
   clipObservations: 5.0
