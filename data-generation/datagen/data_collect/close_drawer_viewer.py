@@ -103,6 +103,11 @@ def eval_multi_agent(eval_dir, eval_episodes):
         config['n_rollout_threads'] = 10
         config['log_dir'] = eval_dir
         
+        cfg_env['device_id'] = 0
+        cfg_train['device'] = 'cuda:0'
+        config['device'] = 'cuda:0'
+        train_args.device_id = 0
+        
         sim_params = parse_sim_params(train_args, cfg_env, cfg_train)
         env = make_ma_isaac_env(train_args, cfg_env, cfg_train, sim_params, agent_index)
         eval_env = env

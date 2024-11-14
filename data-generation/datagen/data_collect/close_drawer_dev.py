@@ -1331,7 +1331,7 @@ class FreightFrankaCloseDrawer(BaseTask):
         self.gym.fetch_results(self.sim, True)
 
         self.env_frame_idx += 1
-        self.render()
+        img = self.render()
 
         self.progress_buf += 1
 
@@ -1349,7 +1349,8 @@ class FreightFrankaCloseDrawer(BaseTask):
             self.average_reward = self.rew_buf.mean() * 0.01 + self.average_reward * 0.99
         self.extras['successes'] = success
         self.extras['success_rate'] = self.success_rate
-        return self.obs_buf, self.rew_buf, self.cost_buf, done, None
+        
+        return self.obs_buf, self.rew_buf, self.cost_buf, done, None, img
 
     def _partial_reset(self, to_reset='all'):
         """
@@ -1491,31 +1492,53 @@ class FreightFrankaCloseDrawer(BaseTask):
         # Render all camera sensors
         self.gym.render_all_camera_sensors(self.sim)
 
-        # Loop over each environment and capture images
-        for env_id, env in enumerate(self.env_ptr_list):
-            camera_handle = self.cameras[env_id]
+        # # Loop over each environment and capture images
+        # for env_id, env in enumerate(self.env_ptr_list):
+        #     camera_handle = self.cameras[env_id]
 
-            # Get the RGBA image tensor from the camera
-            image_tensor = self.gym.get_camera_image_gpu_tensor(
-                self.sim, env, camera_handle, gymapi.IMAGE_COLOR
-            )
-            torch_image_tensor = gymtorch.wrap_tensor(image_tensor)
+        #     # Get the RGBA image tensor from the camera
+        #     image_tensor = self.gym.get_camera_image_gpu_tensor(
+        #         self.sim, env, camera_handle, gymapi.IMAGE_COLOR
+        #     )
+        #     torch_image_tensor = gymtorch.wrap_tensor(image_tensor)
 
-            # Copy the tensor to CPU and convert to NumPy array
-            img = torch_image_tensor.cpu().numpy()
+        #     # Copy the tensor to CPU and convert to NumPy array
+        #     img = torch_image_tensor.cpu().numpy()
 
-            # Convert image from RGBA to RGB and flip vertically
-            img_rgb = img[..., :3].astype(np.uint8)
-            # img_rgb = np.flipud(img_rgb).astype(np.uint8)
+        #     # Convert image from RGBA to RGB and flip vertically
+        #     img_rgb = img[..., :3].astype(np.uint8)
+        #     # img_rgb = np.flipud(img_rgb).astype(np.uint8)
 
-            # Build the output path
-            env_dir = self.output_dirs[env_id]
-            episode_idx = self.env_episode_idx[env_id].item()
-            frame_idx = self.env_frame_idx[env_id].item()
-            image_path = os.path.join(env_dir, f'episode_{episode_idx}_frame_{frame_idx}.png')
+        #     # Build the output path
+        #     env_dir = self.output_dirs[env_id]
+        #     episode_idx = self.env_episode_idx[env_id].item()
+        #     frame_idx = self.env_frame_idx[env_id].item()
+        #     image_path = os.path.join(env_dir, f'episode_{episode_idx}_frame_{frame_idx}.png')
 
-            # Save the image as PNG
-            Image.fromarray(img_rgb).save(image_path)
+        #     # Save the image as PNG
+        #     Image.fromarray(img_rgb).save(image_path)
+        
+        # NOTE: We hard code the environment index to 0, since we need one camera for now
+        assert len(self.env_ptr_list) == 1
+        
+        env = self.env_ptr_list[0]
+        
+        camera_handle = self.cameras[0]
+        
+        # Get the RGBA image tensor from the camera
+        image_tensor = self.gym.get_camera_image_gpu_tensor(
+            self.sim, env, camera_handle, gymapi.IMAGE_COLOR
+        )
+        torch_image_tensor = gymtorch.wrap_tensor(image_tensor)
+        
+        # Copy the tensor to CPU and convert to NumPy array
+        img = torch_image_tensor.cpu().numpy()
+        
+        # Convert image from RGBA to RGB and flip vertically
+        img_rgb = img[..., :3].astype(np.uint8)
+        # img_rgb = np.flipud(img_rgb).astype(np.uint8)
+        
+        return img_rgb
 
 
 def orientation_error(desired, current):
@@ -1642,7 +1665,7 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
 
         actions_tensor = torch.clamp(actions, self.clip_actions_low, self.clip_actions_high)
 
-        obs_buf, rew_buf, cost_buf, reset_buf, _ = self.task.step(actions_tensor)
+        obs_buf, rew_buf, cost_buf, reset_buf, _, img = self.task.step(actions_tensor)
         
         sub_agent_obs = []
         # self.process_sub_agent_obs(self.agent_dof_index, self.agent_finger_index, obs_buf)
@@ -1692,8 +1715,10 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
         costs_all = torch.transpose(torch.stack(sub_agent_cost), 1, 0)
         done_all = torch.transpose(torch.stack(sub_agent_done), 1, 0)
         info_all = torch.stack(sub_agent_info)
+        
+        import pdb; pdb.set_trace()
 
-        return obs_all, state_all, reward_all, costs_all, done_all, info_all, None
+        return obs_all, state_all, reward_all, costs_all, done_all, info_all, None, img
 
     def reset(self):
         actions = 0.01 * (
@@ -1707,7 +1732,7 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
         )
 
         # step the simulator
-        self.task.step(actions)
+        ..., img = self.task.step(actions)
 
         sub_agent_obs = []
         obs_buf = self.task.obs_buf
@@ -1744,7 +1769,7 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
         obs_all = sub_agent_obs
         state_all = torch.transpose(torch.stack(agent_state), 1, 0)
 
-        return obs_all, state_all, None
+        return obs_all, state_all, None, img
 
 
 def parse_sim_params(args, cfg, cfg_train):
@@ -1822,6 +1847,72 @@ def make_ma_isaac_env(args, cfg, cfg_train, sim_params, agent_index):
 
     return env
 
+@torch.no_grad()
+def _eval(runner, eval_episodes=1):
+    eval_episode = 0
+    eval_episode_rewards = []
+    eval_episode_costs = []
+    one_episode_rewards = torch.zeros(1, runner.config["n_eval_rollout_threads"], device=runner.config["device"])
+    one_episode_costs = torch.zeros(1, runner.config["n_eval_rollout_threads"], device=runner.config["device"])
+
+    eval_obs, _, _, img = runner.eval_envs.reset()
+    
+    eval_rnn_states = torch.zeros(runner.config["n_eval_rollout_threads"], runner.num_agents, runner.config["recurrent_N"], runner.config["hidden_size"],
+                                device=runner.config["device"])
+    eval_masks = torch.ones(runner.config["n_eval_rollout_threads"], runner.num_agents, 1, device=runner.config["device"])
+
+    while True:
+        eval_actions_collector = []
+        for agent_id in range(runner.num_agents):
+            runner.trainer[agent_id].prep_rollout()
+            if 'Frank'in runner.config['env_name']:
+                obs_to_eval = eval_obs[agent_id]
+            else:
+                obs_to_eval = eval_obs[:, agent_id]
+                
+            eval_actions, temp_rnn_state = \
+                runner.trainer[agent_id].policy.act(obs_to_eval,
+                                                    eval_rnn_states[:, agent_id],
+                                                    eval_masks[:, agent_id],
+                                                    deterministic=True)
+            eval_rnn_states[:, agent_id] = temp_rnn_state
+            eval_actions_collector.append(eval_actions)
+
+        if runner.config["env_name"] == "Safety9|8HumanoidVelocity-v0":
+            zeros = torch.zeros(eval_actions_collector[-1].shape[0], 1)
+            eval_actions_collector[-1]=torch.cat((eval_actions_collector[-1], zeros), dim=1)
+
+        eval_obs, _, eval_rewards, eval_costs, eval_dones, _, _, img = runner.eval_envs.step(
+            eval_actions_collector
+        )
+
+        reward_env = torch.mean(eval_rewards, dim=1).flatten()
+        cost_env = torch.mean(eval_costs, dim=1).flatten()
+
+        one_episode_rewards += reward_env
+        one_episode_costs += cost_env
+
+        eval_dones_env = torch.all(eval_dones, dim=1)
+
+        eval_rnn_states[eval_dones_env == True] = torch.zeros(
+            (eval_dones_env == True).sum(), runner.num_agents, runner.config["recurrent_N"], runner.config["hidden_size"], device=runner.config["device"])
+
+        eval_masks = torch.ones(runner.config["n_eval_rollout_threads"], runner.num_agents, 1, device=runner.config["device"])
+        eval_masks[eval_dones_env == True] = torch.zeros((eval_dones_env == True).sum(), runner.num_agents, 1,
+                                                          device=runner.config["device"])
+
+        for eval_i in range(runner.config["n_eval_rollout_threads"]):
+            if eval_dones_env[eval_i]:
+                eval_episode += 1
+                eval_episode_rewards.append(one_episode_rewards[:, eval_i].mean().item())
+                one_episode_rewards[:, eval_i] = 0
+                eval_episode_costs.append(one_episode_costs[:, eval_i].mean().item())
+                one_episode_costs[:, eval_i] = 0
+
+        if eval_episode >= eval_episodes:
+            # return np.mean(eval_episode_rewards), np.mean(eval_episode_costs)
+            return eval_episode_rewards, eval_episode_costs
+
 def eval_multi_agent(eval_dir, eval_episodes, load_step=None):
 
     config_path = eval_dir + '/config.json'
@@ -1879,7 +1970,7 @@ def eval_multi_agent(eval_dir, eval_episodes, load_step=None):
         model_dir=model_dir,
     )
     
-    res = runner.eval(eval_episodes)
+    res = _eval(runner, eval_episodes)
 
     env.task.close()
     
@@ -1904,17 +1995,6 @@ def benchmark_eval():
 
         reward, cost = eval_multi_agent(exp_dir, eval_episodes)
         
-        # output_file = open(f"{save_dir}/eval_result.txt", 'a')
-        
-        # # two wise after point
-        # reward_mean = round(np.mean(rewards), 2)
-        # reward_std = round(np.std(rewards), 2)
-        # cost_mean = round(np.mean(costs), 2)
-        # cost_std = round(np.std(costs), 2)
-        # print(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std}, the reuslt is saved in {save_dir}/eval_result.txt")
-        # # output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}±{reward_std}, cost: {cost_mean}±{cost_std} \n")
-        # output_file.write(f"After {eval_episodes} episodes evaluation, the {algo} in {env} evaluation reward: {reward_mean}+/-{reward_std}, cost: {cost_mean}+/-{cost_std} \n")
-
 
 if __name__ == '__main__':
     benchmark_eval()
