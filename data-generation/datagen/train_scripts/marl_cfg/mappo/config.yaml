@@ -4,8 +4,8 @@ experiment_name: check
 seed: 0
 run_dir: ./runs
 num_env_steps: 100000000
-episode_length: 8
-n_rollout_threads: 80
+episode_length: 192
+n_rollout_threads: 1
 n_eval_rollout_threads: 1
 hidden_size: 512
 use_render: False
@@ -22,7 +22,7 @@ gamma: 0.96
 gae_lambda: 0.95
 use_gae: True
 use_popart: True
-use_valuenorm: False
+use_valuenorm: True
 use_proper_time_limits: False
 
 target_kl: 0.016
@@ -44,8 +44,8 @@ use_huber_loss: True
 use_value_active_masks: False
 use_policy_active_masks: False
 
-actor_lr: 9.e-5
-critic_lr: 5.e-3
+actor_lr: 5.e-4
+critic_lr: 5.e-4
 opti_eps: 1.e-5
 weight_decay: 0.0
 

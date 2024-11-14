@@ -4,14 +4,14 @@ experiment_name: check
 seed: 0
 run_dir: ./runs
 num_env_steps: 100000000
-episode_length: 8
+episode_length: 192
 n_rollout_threads: 1
 n_eval_rollout_threads: 1
 hidden_size: 512
 use_render: False
 recurrent_N: 1
 
-save_interval: 1000000
+save_interval: 500
 use_eval: False
 eval_interval: 25
 log_interval: 25
@@ -52,8 +52,8 @@ use_huber_loss: True
 use_value_active_masks: False
 use_policy_active_masks: False
 
-actor_lr: 9.e-5
-critic_lr: 5.e-3
+actor_lr: 5.e-4
+critic_lr: 5.e-4
 opti_eps: 1.e-5
 weight_decay: 0.0
 
