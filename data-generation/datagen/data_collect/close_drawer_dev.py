@@ -1342,7 +1342,7 @@ class FreightFrankaCloseDrawer(BaseTask):
         done = self.reset_buf.clone()
         success = self.success.clone()
         self._partial_reset(self.reset_buf)
-
+        
         if self.average_reward == None:
             self.average_reward = self.rew_buf.mean()
         else:
@@ -1716,8 +1716,6 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
         done_all = torch.transpose(torch.stack(sub_agent_done), 1, 0)
         info_all = torch.stack(sub_agent_info)
         
-        import pdb; pdb.set_trace()
-
         return obs_all, state_all, reward_all, costs_all, done_all, info_all, None, img
 
     def reset(self):
@@ -1732,7 +1730,7 @@ class FreightFrankaMultiVecTaskPython(FreightFrankaMultiVecTask):
         )
 
         # step the simulator
-        ..., img = self.task.step(actions)
+        _, _, _, _, _, img = self.task.step(actions)
 
         sub_agent_obs = []
         obs_buf = self.task.obs_buf
@@ -1855,12 +1853,22 @@ def _eval(runner, eval_episodes=1):
     one_episode_rewards = torch.zeros(1, runner.config["n_eval_rollout_threads"], device=runner.config["device"])
     one_episode_costs = torch.zeros(1, runner.config["n_eval_rollout_threads"], device=runner.config["device"])
 
-    eval_obs, _, _, img = runner.eval_envs.reset()
+    eval_obs, eval_state, _, img = runner.eval_envs.reset()
     
     eval_rnn_states = torch.zeros(runner.config["n_eval_rollout_threads"], runner.num_agents, runner.config["recurrent_N"], runner.config["hidden_size"],
                                 device=runner.config["device"])
     eval_masks = torch.ones(runner.config["n_eval_rollout_threads"], runner.num_agents, 1, device=runner.config["device"])
-
+    
+    data_actions = []
+    data_observations = []
+    data_rewards = []
+    data_costs = []
+    
+    data_actions.append([])
+    data_observations.append([eval_state[0].clone()])
+    data_rewards.append([])
+    data_costs.append([])
+    
     while True:
         eval_actions_collector = []
         for agent_id in range(runner.num_agents):
@@ -1882,12 +1890,17 @@ def _eval(runner, eval_episodes=1):
             zeros = torch.zeros(eval_actions_collector[-1].shape[0], 1)
             eval_actions_collector[-1]=torch.cat((eval_actions_collector[-1], zeros), dim=1)
 
-        eval_obs, _, eval_rewards, eval_costs, eval_dones, _, _, img = runner.eval_envs.step(
+        data_actions[-1].append(torch.cat(eval_actions_collector, dim=-1))
+
+        eval_obs, eval_state, eval_rewards, eval_costs, eval_dones, _, _, img = runner.eval_envs.step(
             eval_actions_collector
         )
-
+        
         reward_env = torch.mean(eval_rewards, dim=1).flatten()
         cost_env = torch.mean(eval_costs, dim=1).flatten()
+        
+        data_rewards[-1].append(reward_env)
+        data_costs[-1].append(cost_env)
 
         one_episode_rewards += reward_env
         one_episode_costs += cost_env
@@ -1901,6 +1914,9 @@ def _eval(runner, eval_episodes=1):
         eval_masks[eval_dones_env == True] = torch.zeros((eval_dones_env == True).sum(), runner.num_agents, 1,
                                                           device=runner.config["device"])
 
+        # NOTE: we hard code the number of threads to 1
+        assert runner.config["n_eval_rollout_threads"] == 1
+
         for eval_i in range(runner.config["n_eval_rollout_threads"]):
             if eval_dones_env[eval_i]:
                 eval_episode += 1
@@ -1908,10 +1924,21 @@ def _eval(runner, eval_episodes=1):
                 one_episode_rewards[:, eval_i] = 0
                 eval_episode_costs.append(one_episode_costs[:, eval_i].mean().item())
                 one_episode_costs[:, eval_i] = 0
+                
+                if eval_episode < eval_episodes:
+                    data_actions.append([])
+                    data_rewards.append([])
+                    data_costs.append([])
+                    
+        # NOTE: we hard code the number of env to 1
+        if not torch.any(eval_dones):
+            data_observations[-1].append(eval_state[0].clone())
+        elif eval_episode < eval_episodes:
+            data_observations.append([eval_state[0].clone()])
 
         if eval_episode >= eval_episodes:
             # return np.mean(eval_episode_rewards), np.mean(eval_episode_costs)
-            return eval_episode_rewards, eval_episode_costs
+            return data_observations, data_actions, data_rewards, data_costs
 
 def eval_multi_agent(eval_dir, eval_episodes, load_step=None):
 
@@ -1970,11 +1997,11 @@ def eval_multi_agent(eval_dir, eval_episodes, load_step=None):
         model_dir=model_dir,
     )
     
-    res = _eval(runner, eval_episodes)
-
+    data_observations, data_actions, data_rewards, data_costs = _eval(runner, eval_episodes)
+    
     env.task.close()
     
-    return res
+    return data_observations, data_actions, data_rewards, data_costs
 
 def benchmark_eval():
     parser = argparse.ArgumentParser()
@@ -1993,8 +2020,7 @@ def benchmark_eval():
         if os.path.exists(save_dir) is False:
             os.makedirs(save_dir)
 
-        reward, cost = eval_multi_agent(exp_dir, eval_episodes)
-        
+        data_observations, data_actions, data_rewards, data_costs = eval_multi_agent(exp_dir, eval_episodes)
 
 if __name__ == '__main__':
     benchmark_eval()
